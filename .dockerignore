@@ -1,0 +1,41 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Test and debug checkpoints — server trains its own
+checkpoints/
+
+# Local outputs — regenerated on server
+outputs/
+
+# Test suite and CI artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Development / archive
+archive/
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Optuna databases from local tuning
+*.db
+
+# OS
+.DS_Store
+Thumbs.db

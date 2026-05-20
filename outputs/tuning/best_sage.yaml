@@ -1,0 +1,6 @@
+dropout: 0.062397808134481064
+emb_dim: 64
+lr: 0.00013066739238053285
+model_type: sage
+n_layers: 1
+reg_lambda: 0.0003967605077052988

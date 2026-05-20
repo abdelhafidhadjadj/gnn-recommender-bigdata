@@ -1,0 +1,34 @@
+# Core deep learning
+torch>=2.1
+torch-geometric>=2.4
+
+# GNN sparse ops (optional — required for LinkNeighborLoader mini-batch mode)
+# GPU server: pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+# torch-scatter
+# torch-sparse
+
+# Embeddings
+sentence-transformers>=2.2
+
+# Approximate nearest neighbour search
+# GPU server:  pip install faiss-gpu-cu12
+# CPU only:    pip install faiss-cpu
+faiss-cpu
+
+# Hyperparameter tuning
+optuna>=3.0
+
+# Data
+pandas>=1.5
+numpy>=1.24
+scikit-learn>=1.2
+
+# Config
+pyyaml>=6.0
+
+# Visualisation
+matplotlib>=3.7
+seaborn>=0.12
+
+# Testing
+pytest>=7.0

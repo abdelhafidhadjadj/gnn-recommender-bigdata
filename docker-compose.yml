@@ -1,0 +1,73 @@
+# ── 4-GPU distributed training on a single machine ───────────────────────────
+#
+# Uses torchrun (--nproc_per_node=4) inside ONE container that has
+# access to all 4 GPUs. This is the correct pattern for single-node
+# multi-GPU training — no need for multi-container orchestration.
+#
+# Prerequisites:
+#   - NVIDIA Container Toolkit installed on the host
+#   - docker compose plugin (not docker-compose v1)
+#
+# Launch:
+#   docker compose -f docker/docker-compose.yml up
+#   docker compose -f docker/docker-compose.yml up -d   # detached
+#
+# Override model / mode via env file:
+#   cp docker/.env.example docker/.env
+#   # edit docker/.env
+#   docker compose --env-file docker/.env up
+# ─────────────────────────────────────────────────────────────────────────────
+version: "3.9"
+
+services:
+  trainer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.prod
+
+    # torchrun launches 4 worker processes inside this single container
+    command: >
+      torchrun
+      --nproc_per_node=${WORLD_SIZE:-4}
+      --standalone
+      src/main.py
+      --mode  ${TRAINING_MODE:-scratch}
+      --model ${MODEL_TYPE:-sage}
+      --seed  ${SEED:-42}
+
+    # Required for NCCL shared-memory communication between GPU processes
+    ipc: host
+    ulimits:
+      memlock: -1      # unlimited locked memory (NCCL requirement)
+      stack: 67108864  # 64 MB stack per process
+
+    # GPU access: all 4 GPUs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Mount host paths for data and checkpoints (survives container restart)
+    volumes:
+      - ../data:/workspace/data
+      - ../checkpoints:/workspace/checkpoints
+
+    # Env vars — override via docker/.env or CLI
+    environment:
+      - WORLD_SIZE=${WORLD_SIZE:-4}
+      - MASTER_ADDR=localhost
+      - MASTER_PORT=${MASTER_PORT:-29500}
+      - TRAINING_MODE=${TRAINING_MODE:-scratch}
+      - MODEL_TYPE=${MODEL_TYPE:-sage}
+      - SEED=${SEED:-42}
+      - CUDA_VISIBLE_DEVICES=0,1,2,3
+
+    # Log output to stdout (visible with `docker compose logs -f`)
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"

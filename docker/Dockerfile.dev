@@ -1,0 +1,40 @@
+# ── CPU-only development image ────────────────────────────────────────────────
+# For local iteration on a laptop (no GPU required).
+# Runs automatically in --debug mode (emb_dim=16, 3 epochs).
+#
+# Build:  docker build -f docker/Dockerfile.dev -t gnn-rec:dev .
+# Run:    docker run --rm -v $(pwd)/data:/workspace/data gnn-rec:dev \
+#             --mode scratch --data-dir data/test --debug
+# ──────────────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# PyTorch CPU-only wheel (much smaller than CUDA build)
+RUN pip install --no-cache-dir \
+    torch==2.4.0 torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# PyTorch Geometric (CPU)
+RUN pip install --no-cache-dir torch-geometric
+
+# Project dependencies
+RUN pip install --no-cache-dir \
+    sentence-transformers \
+    faiss-cpu \
+    optuna \
+    pandas numpy scikit-learn
+
+WORKDIR /workspace
+COPY . /workspace/
+
+# Default: debug mode so `docker run gnn-rec:dev` works immediately
+ENTRYPOINT ["python", "main.py"]
+CMD ["--mode", "scratch", "--debug", "--data-dir", "data/test"]

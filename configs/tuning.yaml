@@ -1,0 +1,23 @@
+data:
+  data_dir: data/medium
+
+tune:
+  n_trials: 30
+  timeout_seconds: 3600
+  direction: maximize       # maximize validation NDCG@10
+  pruner: median
+  study_dir: outputs/tuning
+  metric: ndcg_10
+
+train:
+  num_epochs: 30            # shorter epochs per trial
+
+eval:
+  k_list: [5, 10]
+
+checkpoint:
+  dir: checkpoints/tuning
+  keep_last_n: 1
+
+model_type: sage
+seed: 42

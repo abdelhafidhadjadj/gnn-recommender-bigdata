@@ -1,0 +1,5 @@
+emb_dim: 128
+lr: 0.0003839629299804173
+model_type: lightgcn
+n_layers: 2
+reg_lambda: 1.2562773503807034e-05

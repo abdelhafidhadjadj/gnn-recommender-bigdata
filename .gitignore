@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Checkpoints and model weights
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Data (large files — track schemas not content)
+data/raw/
+data/processed/
+data/new_data/
+# Keep test and medium data in git for reproducibility
+!data/test/
+!data/medium/
+
+# Outputs
+outputs/logs/
+outputs/plots/
+outputs/reports/
+outputs/tuning/*.db
+outputs/tuning/*.csv
+
+# Optuna databases
+*.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+!.env.example
+
+# Logs
+*.log
+
+# Pytest
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# MyPy
+.mypy_cache/
+
+# Ruff / Black
+.ruff_cache/
