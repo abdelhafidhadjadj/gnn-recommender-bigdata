@@ -1,0 +1,66 @@
+# ── Benchmark GPU image ────────────────────────────────────────────────────────
+# Target hardware: RTX 3070 Laptop (Ampere, Compute Capability 8.6)
+# Host driver:     CUDA 12.x
+# Container base:  CUDA 12.1 (forward-compatible)
+#
+# Extends the prod image with:
+#   - PySpark (to submit Spark jobs from inside the container)
+#   - pyarrow (to read parquet output from Spark)
+#   - psutil  (resource monitoring)
+#   - openjdk-11 (required by PySpark)
+#
+# Build:
+#   docker compose -f docker/docker-compose.bigdata.yml build trainer
+# ──────────────────────────────────────────────────────────────────────────────
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+
+# RTX 3070 Laptop = Ampere (CC 8.6)
+ENV TORCH_CUDA_ARCH_LIST="8.6"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Java (required by PySpark)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-11-jre-headless \
+        git curl build-essential procps \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+
+# PyTorch Geometric + CUDA 12.1 wheels (Ampere support included)
+RUN pip install --no-cache-dir torch-geometric
+RUN pip install --no-cache-dir \
+    torch-scatter torch-sparse torch-cluster \
+    -f https://data.pyg.org/whl/torch-2.4.0+cu124.html
+
+# FAISS-CPU (évite les conflits de versions CUDA avec PyTorch)
+RUN pip install --no-cache-dir faiss-cpu
+
+# Core ML dependencies — versions pinned pour compatibilité PyTorch 2.4
+RUN pip install --no-cache-dir \
+    "sentence-transformers==2.7.0" \
+    "transformers==4.44.2" \
+    "tokenizers>=0.19,<0.21" \
+    optuna \
+    pandas numpy scikit-learn \
+    pyyaml matplotlib seaborn
+
+# Distributed / Big Data layer
+RUN pip install --no-cache-dir \
+    pyspark==3.5.0 \
+    pyarrow \
+    psutil \
+    hdfs
+
+# NCCL tuning for single-GPU (benchmark uses 1 GPU per trainer container)
+ENV NCCL_P2P_LEVEL=NVL
+ENV NCCL_SHM_DISABLE=0
+
+WORKDIR /workspace
+# Source code is mounted as volumes — do not COPY here
+# (allows live edits without rebuilding)
+
+ENV PYTHONPATH=/workspace/src:/workspace
+
+CMD ["sleep", "infinity"]

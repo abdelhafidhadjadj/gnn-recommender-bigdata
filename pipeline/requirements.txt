@@ -1,0 +1,11 @@
+# Kafka Python client
+kafka-python>=2.0.2
+
+# HTTP requests (PubMed + ArXiv APIs)
+requests>=2.31.0
+
+# PySpark (Structured Streaming consumer)
+pyspark>=3.3.0
+
+# Utilities
+python-dotenv>=1.0.0

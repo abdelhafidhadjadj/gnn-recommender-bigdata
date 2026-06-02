@@ -7,6 +7,8 @@ Key fixes vs. original:
       so that SBERT embedding index i == encoded item id i.
 """
 from __future__ import annotations
+import hashlib
+import os
 import numpy as np
 import pandas as pd
 import torch
@@ -21,7 +23,10 @@ from config import GraphConfig, DataConfig
 
 def load_edge_csv(df: pd.DataFrame, src_col: str, dst_col: str,
                   rating_col: str, rating_thresh: int):
-    edge_attr = torch.from_numpy(df[rating_col].values).view(-1, 1).to(torch.long) >= rating_thresh
+    # .to_numpy() gère à la fois les numpy arrays et les ArrowStringArray
+    # (pandas 2.x / PySpark toPandas() peut retourner des types Arrow-backed)
+    rating_np = df[rating_col].to_numpy(dtype=np.float64, na_value=0.0)
+    edge_attr = torch.from_numpy(rating_np).view(-1, 1).to(torch.long) >= rating_thresh
     edge_index = [[], []]
     edge_values = []
     for i in range(edge_attr.shape[0]):
@@ -65,6 +70,21 @@ def build_temporal_weights(review_df_full: pd.DataFrame,
 # SBERT item embeddings
 # ---------------------------------------------------------------------------
 
+def _sbert_cache_path(business_df_ordered: pd.DataFrame,
+                      cfg: GraphConfig) -> str:
+    """
+    Génère un chemin de cache unique basé sur :
+      - les business_ids (ordre + contenu)
+      - le nom du modèle SBERT
+    Le cache est stocké dans .sbert_cache/ à la racine du projet.
+    """
+    ids_str = "".join(business_df_ordered["business_id"].astype(str).tolist())
+    key     = hashlib.md5((ids_str + cfg.sbert_model).encode()).hexdigest()
+    cache_dir = ".sbert_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"{key}.npy")
+
+
 def build_item_embeddings(business_df_ordered: pd.DataFrame,
                           device: torch.device,
                           cfg: GraphConfig) -> np.ndarray:
@@ -72,8 +92,24 @@ def build_item_embeddings(business_df_ordered: pd.DataFrame,
     business_df_ordered MUST be sorted to match LabelEncoder order
     (caller: business_df.set_index('business_id').loc[item_enc.classes_].reset_index())
     so that embedding row i == encoded item i.
+
+    Les embeddings SBERT sont mis en cache dans .sbert_cache/<hash>.npy.
+    Les runs suivants sur la meme partition chargent le cache (~0.1s)
+    au lieu de re-encoder (~30-120s selon la taille).
     """
-    sbert = SentenceTransformer(cfg.sbert_model)
+    cache_path = _sbert_cache_path(business_df_ordered, cfg)
+
+    # ── Cache hit ─────────────────────────────────────────────────────────────
+    if os.path.exists(cache_path):
+        print(f"[SBERT] Cache trouve -> {cache_path}  (skip encodage)")
+        return np.load(cache_path)
+
+    # ── Cache miss : encoder et sauvegarder ───────────────────────────────────
+    print(f"[SBERT] Encodage de {len(business_df_ordered)} items ({cfg.sbert_model}) ...")
+    # local_files_only=True force le mode offline — le modèle est servi depuis
+    # le cache HuggingFace monté en volume (/root/.cache/huggingface/hub)
+    offline = os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
+    sbert = SentenceTransformer(cfg.sbert_model, local_files_only=offline)
     sbert = sbert.to(device)
     categories = business_df_ordered['categories'].fillna('').tolist()
     embeddings = sbert.encode(
@@ -83,7 +119,15 @@ def build_item_embeddings(business_df_ordered: pd.DataFrame,
         convert_to_numpy=True,
         device=str(device),
     )
-    return embeddings.astype(np.float32)
+    result = embeddings.astype(np.float32)
+    np.save(cache_path, result)
+    print(f"[SBERT] Cache sauvegarde -> {cache_path}")
+    # Libérer le modèle SBERT de la mémoire GPU avant l'entraînement
+    del sbert
+    if device.type == "cuda":
+        import torch as _torch
+        _torch.cuda.empty_cache()
+    return result
 
 
 # ---------------------------------------------------------------------------

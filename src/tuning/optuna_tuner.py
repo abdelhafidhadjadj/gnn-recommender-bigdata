@@ -118,11 +118,21 @@ def _make_objective(
             ranking = compute_ranking_metrics(
                 model, full_edge_index, df_val, n_users, cfg.eval
             )
-        ndcg = ranking.get(eval_k, {}).get("NDCG", 0.0)
-        trial.report(ndcg, step=n_epochs)
+        m = ranking.get(eval_k, {})
+
+        # ── Composite score (eq. 3.21) ─────────────────────────────────────
+        # Score = ndcg_w × NDCG@K + prec_w × P@K + rec_w × R@K
+        # Weights come from TuneConfig (default: 0.4 / 0.3 / 0.3)
+        score = (
+            cfg.tune.ndcg_w * m.get("NDCG", 0.0)
+            + cfg.tune.prec_w * m.get("P",    0.0)
+            + cfg.tune.rec_w  * m.get("R",    0.0)
+        )
+
+        trial.report(score, step=n_epochs)
         if trial.should_prune():
             raise optuna.TrialPruned()
-        return ndcg
+        return score
 
     return objective
 

@@ -1,0 +1,243 @@
+# ── Big Data Distributed Stack ────────────────────────────────────────────────
+#
+#  Images officielles :
+#    HDFS    : bde2020/hadoop-namenode + hadoop-datanode
+#    Spark   : apache/spark-py:3.5.3  (image officielle Apache)
+#    Trainer : pytorch/pytorch + CUDA (Dockerfile.benchmark)
+#    Monitor : prom/prometheus + grafana/grafana
+#
+#  Usage:
+#    bash scripts/run_benchmark.sh
+#    # ou manuellement :
+#    docker compose -f docker/docker-compose.bigdata.yml up -d --scale spark-worker=2
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-spark-common: &spark-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.spark
+  user: root
+  volumes:
+    - ../spark:/opt/spark-apps:ro
+    - ../data/medium:/input-data:ro
+    - processed-data:/processed
+  networks:
+    - gnn-net
+
+services:
+
+  # ── HDFS Namenode ────────────────────────────────────────────────────────────
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    hostname: namenode
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode:/hadoop/dfs/name
+      - ../data/medium:/input-data:ro
+    environment:
+      - CLUSTER_NAME=gnn-cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=1
+      - HDFS_CONF_dfs_namenode_datanode_registration_ip___hostname___check=false
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9870"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - gnn-net
+
+  # ── HDFS Datanode ────────────────────────────────────────────────────────────
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    hostname: datanode
+    volumes:
+      - hdfs-datanode:/hadoop/dfs/data
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - HDFS_CONF_dfs_replication=1
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - gnn-net
+
+  # ── Spark Master ─────────────────────────────────────────────────────────────
+  spark-master:
+    <<: *spark-common
+    container_name: spark-master
+    hostname: spark-master
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+      --host spark-master
+      --port 7077
+      --webui-port 8080
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "4040:4040"
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_LOCAL_IP=spark-master
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.socket(); s.settimeout(3); s.connect(('spark-master',8080)); s.close()\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── Spark Workers (4 workers fixes, visibles dans l'UI Spark) ───────────────
+  x-spark-worker: &spark-worker-common
+    <<: *spark-common
+    environment:
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-3g}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
+    depends_on:
+      spark-master:
+        condition: service_healthy
+
+  spark-worker-1:
+    <<: *spark-worker-common
+    container_name: spark-worker-1
+    hostname: spark-worker-1
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      --host spark-worker-1
+      spark://spark-master:7077
+
+  spark-worker-2:
+    <<: *spark-worker-common
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      --host spark-worker-2
+      spark://spark-master:7077
+
+  spark-worker-3:
+    <<: *spark-worker-common
+    container_name: spark-worker-3
+    hostname: spark-worker-3
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      --host spark-worker-3
+      spark://spark-master:7077
+
+  spark-worker-4:
+    <<: *spark-worker-common
+    container_name: spark-worker-4
+    hostname: spark-worker-4
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      --host spark-worker-4
+      spark://spark-master:7077
+
+  # ── GPU Trainer ──────────────────────────────────────────────────────────────
+  trainer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.benchmark
+    container_name: trainer
+    hostname: trainer
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ../data:/workspace/data:ro
+      - ../src:/workspace/src:ro
+      - ../spark:/workspace/spark:ro
+      - ../benchmark:/workspace/benchmark:ro
+      - ../configs:/workspace/configs:ro
+      - ../checkpoints:/workspace/checkpoints
+      - ../outputs:/workspace/outputs
+      - processed-data:/workspace/processed
+    environment:
+      - HDFS_URL=hdfs://namenode:9000
+      - SPARK_MASTER=spark://spark-master:7077
+      - PROCESSED_DIR=/workspace/processed
+      - PYTHONPATH=/workspace/src:/workspace
+      - CUDA_VISIBLE_DEVICES=0
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    networks:
+      - gnn-net
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - gnn-net
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    networks:
+      - gnn-net
+
+  # ── Node Exporter ─────────────────────────────────────────────────────────────
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+    ports:
+      - "9100:9100"
+    networks:
+      - gnn-net
+
+volumes:
+  hdfs-namenode:
+  hdfs-datanode:
+  processed-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  gnn-net:
+    driver: bridge

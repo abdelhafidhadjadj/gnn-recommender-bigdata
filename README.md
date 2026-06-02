@@ -1,429 +1,186 @@
 # GNN Recommender System
 
-A production-ready Graph Neural Network recommender system supporting **GraphSAGE**, **GAT**, and **LightGCN**. Designed for Yelp Health & Medical data with scratch training, incremental retraining, hyperparameter tuning, and 4-GPU distributed training.
+Système de recommandation basé sur des **Graph Neural Networks** appliqué aux données de santé Yelp.  
+Supporte **GraphSAGE**, **GAT** et **LightGCN** avec entraînement scratch, apprentissage incrémental, tuning Optuna et interface Streamlit.
 
 ---
 
-## Supported Models
+## Modèles supportés
 
-| Model | Description | Best for |
-|-------|-------------|----------|
-| **GraphSAGE** | 2-layer inductive GNN with residual connections | General use, robust baseline |
-| **GAT** | Graph Attention Network with configurable heads | When attention weighting matters |
-| **LightGCN** | Lightweight collaborative filtering GNN | Pure CF signal, fast training |
+| Modèle | Architecture | NDCG@10 (full, w=1) | RMSE |
+|--------|-------------|---------------------|------|
+| **GraphSAGE** | 2 couches SAGEConv, agrégation mean | 0.0031 | 2.1774 |
+| **GAT** | GATConv multi-head (4 têtes) | **0.0080** | **1.9746** |
+| **LightGCN** | GCN simplifié, filtrage collaboratif | 0.0048 | 1.9093 |
 
 ---
 
-## Project Structure
+## Structure du projet
 
 ```
 gnn_recommender/
-├── src/                    # All source code
-│   ├── main.py             # CLI entry point
-│   ├── config.py           # Typed dataclass configuration
-│   ├── models/             # GraphSAGE, GAT, LightGCN
-│   ├── data/               # Loading, preprocessing, graph building
-│   ├── training/           # Trainer, BPR loss, DDP, incremental
-│   ├── evaluation/         # Ranking metrics (Precision@K, NDCG@K, ...)
-│   ├── tuning/             # Optuna hyperparameter search
-│   └── utils/              # Checkpoints, hardware, seeding
-│
-├── configs/                # YAML configuration presets
-│   ├── default.yaml
-│   ├── cpu_debug.yaml
-│   ├── medium_sage.yaml
-│   ├── medium_gat.yaml
-│   ├── medium_lightgcn.yaml
-│   ├── server_4gpu.yaml
-│   └── tuning.yaml
-│
-├── data/
-│   ├── test/               # Small dataset (300 users, 150 businesses)
-│   ├── medium/             # Medium dataset (2K users, 500 businesses)
-│   ├── raw/                # Production data (place Yelp CSVs here)
-│   └── new_data/           # New batch for incremental retraining
-│
-├── scripts/                # Shell scripts for common workflows
-│   ├── run_debug.sh
-│   ├── run_sage.sh / run_gat.sh / run_lightgcn.sh
-│   ├── run_tuning.sh
-│   ├── run_incremental.sh
-│   └── run_server_4gpu.sh
-│
-├── tests/                  # pytest test suite
-├── checkpoints/            # Saved model checkpoints (gitignored)
-├── outputs/                # Logs, metrics, plots (gitignored)
-├── docker/                 # Docker build files
-├── Dockerfile              # Production GPU image
-├── docker-compose.yml      # 4-GPU server deployment
-└── archive/                # Old experiments (not production code)
+├── src/                          # Code source
+│   ├── main.py                   # Point d'entrée CLI
+│   ├── config.py                 # Configuration (dataclasses)
+│   ├── models/                   # GraphSAGE, GAT, LightGCN
+│   ├── data/                     # Loader, preprocessing, graph builder
+│   ├── training/                 # Trainer, BPR loss, DDP, incrémental
+│   ├── evaluation/               # Métriques ranking
+│   ├── tuning/                   # HPO Optuna
+│   └── utils/                    # Checkpoint, hardware, plots
+├── demo/
+│   ├── app.py                    # Interface Streamlit (port 8501)
+│   └── inference.py
+├── pipeline/                     # Kafka + Spark + HDFS + ELK
+├── docker/
+│   └── docker-compose.yml        # Entraînement distribué
+├── scripts/
+│   ├── compare_distributed.py    # Dashboard HTML résultats
+│   └── hdfs_upload.sh            # Upload données HDFS
+├── data/raw/                     # 1k, 5k, 10k, 50k, 100k, full
+├── Dockerfile                    # Image GPU (PyTorch 2.4.0+cu121)
+├── COMMANDS.md                   # Référence complète des commandes
+├── DOCUMENTATION_FR.md           # Documentation technique
+└── CHAPTER4_QUESTIONS.md         # Réponses chapitre 4
 ```
 
 ---
 
-## Dataset Format
+## Environnement
 
-Three CSV files are required:
-
-**businesses** (`yelp_academic_dataset_business_healthandmedical.csv`):
-```
-business_id, name, address, city, state, postal_code, stars, review_count, is_open, categories
-```
-
-**users** (`yelp_academic_dataset_user_healthandmedical.csv`):
-```
-user_id, name, review_count, yelping_since, average_stars, fans, useful, funny, cool
-```
-
-**reviews** (`yelp_academic_dataset_review_healthandmedical.csv`):
-```
-review_id, user_id, business_id, stars, date, text, useful, funny, cool
-```
-
-Place files in `data/raw/` for production or `data/medium/` for local testing.
+| | Local (Windows) | Docker (entraînement) |
+|---|---|---|
+| Python | 3.13 | 3.11 |
+| PyTorch | 2.11.0+cpu | **2.4.0+cu121** |
+| GPU | — | **RTX 3070 Laptop 8 GB** |
+| CUDA | — | 12.1 |
 
 ---
 
-## Installation (Local)
+## Installation rapide
 
-```bash
-# 1. Clone the repository
-git clone <repo-url>
-cd gnn_recommender
+```powershell
+# Vérifier l'environnement local
+python3.13 -c "import torch; print(torch.__version__)"
 
-# 2. Create virtual environment
-python -m venv .venv
-source .venv/bin/activate        # Linux/macOS
-.venv\Scripts\activate           # Windows
-
-# 3. Install dependencies
-pip install -r requirements.txt
-```
-
-For GPU support on the server:
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+# Construire l'image Docker (une seule fois)
+docker build -t gnn-rec:prod .
 ```
 
 ---
 
-## Installation (Docker)
+## Datasets
+
+| Taille | Reviews | Users | Items |
+|--------|---------|-------|-------|
+| `1k` | 1 000 | 783 | ~500 |
+| `5k` | 5 000 | 3 870 | ~2k |
+| `10k` | 10 000 | 7 738 | ~4k |
+| `50k` | 50 000 | 38 883 | ~9k |
+| `100k` | 100 000 | 77 640 | 11 813 |
+| `full` | **188 044** | **145 683** | **11 890** |
+
+Format : 3 fichiers CSV Yelp Health & Medical par taille (`reviews`, `users`, `business`).
+
+---
+
+## Lancer l'entraînement
 
 ```bash
-# Build production GPU image
-docker compose build
+# Standard (pandas, w=1)
+WORLD_SIZE=1 MODEL_TYPE=sage DATA_DIR=data/raw/100k SIZE=100k \
+  docker compose -f docker/docker-compose.yml up
 
-# Or build dev CPU image
-docker build -f docker/Dockerfile.dev -t gnn_recommender_dev .
+# Bigdata (Spark+HDFS, w=4)
+WORLD_SIZE=4 MODEL_TYPE=sage DATA_DIR=data/raw/100k SIZE=100k \
+  docker compose -f docker/docker-compose.yml up
+
+# Dataset full (full_batch, w=1)
+WORLD_SIZE=1 MODEL_TYPE=gat DATA_DIR=data/raw/full SIZE=full \
+  docker compose -f docker/docker-compose.yml up
+```
+
+> Variables obligatoires : `WORLD_SIZE` + `MODEL_TYPE` + `DATA_DIR` + `SIZE`
+
+---
+
+## Résultats — Speedup t_train
+
+| Modèle | Taille | w2 | w3 | w4 |
+|--------|--------|----|----|-----|
+| SAGE | full | 1.38× | 1.55× | **1.55×** |
+| GAT | full | 1.30× | — | — |
+| LightGCN | full | 1.37× | 1.54× | **1.61×** |
+| LightGCN | 100k | 1.29× | 1.40× | **1.46×** |
+
+> Petits datasets (1k) : speedup < 1 — overhead DDP > gain calcul.
+
+---
+
+## VRAM par worker
+
+| Condition | VRAM |
+|---|---|
+| `SIZE=full` + `w=1` | 4 GB |
+| `GAT` + `w=1` + `SIZE=100k` | 2.5 GB |
+| Tout le reste | **2 GB** |
+
+---
+
+## Dashboard résultats
+
+```bash
+python3.13 scripts/compare_distributed.py --all --html
+# Ouvre outputs/report.html dans le navigateur
 ```
 
 ---
 
-## Quick Start
+## Interface Streamlit
 
-### Debug mode (CPU, ~30 seconds)
+```powershell
+.\run_app.ps1
+# → http://localhost:8501
+```
+
+3 onglets : Recommandations · Nouvel Utilisateur (cold-start) · Apprentissage Incrémental
+
+---
+
+## Pipeline Big Data (optionnel)
 
 ```bash
-python src/main.py --model sage --mode scratch --data-dir data/test --debug --no-amp
+cd pipeline && docker compose up -d
+python3.13 pipeline/producers/pubmed_producer.py   # Terminal 1
+python3.13 pipeline/producers/arxiv_producer.py    # Terminal 2
+.\pipeline\run_consumer.ps1                         # Spark consumer
 ```
 
-Expected output:
-```
-Hardware tier : debug  (emb_dim=16, epochs=3)
-[Train] SAGE  emb_dim=16  lr=0.005  epochs=3
-...
-RMSE  (sigmoid [1,5]): ~1.0
-Precision@5: ~0.01
+Services : Kafka UI (8080) · HDFS (9870) · Spark (8081) · Kibana (5601)
+
+---
+
+## Tests
+
+```bash
+python3.13 -m pytest tests/ -v
 ```
 
 ---
 
-## Training
+## Documentation
 
-### Train GraphSAGE
-
-```bash
-python src/main.py --model sage --mode scratch \
-    --data-dir data/medium --epochs 100 \
-    --no-amp --ckpt-dir checkpoints/sage
-```
-
-### Train GAT
-
-```bash
-python src/main.py --model gat --mode scratch \
-    --data-dir data/medium --epochs 100 \
-    --no-amp --ckpt-dir checkpoints/gat
-```
-
-### Train LightGCN
-
-```bash
-python src/main.py --model lightgcn --mode scratch \
-    --data-dir data/medium --epochs 100 \
-    --no-amp --ckpt-dir checkpoints/lightgcn
-```
+| Fichier | Contenu |
+|---|---|
+| `COMMANDS.md` | Toutes les commandes (entraînement, Docker, HDFS) |
+| `DOCUMENTATION_FR.md` | Architecture, modèles, pipeline |
+| `CHAPTER4_QUESTIONS.md` | Réponses détaillées chapitre 4 avec métriques réelles |
 
 ---
 
-## Incremental Retraining
-
-Use when new interactions arrive — no full retraining needed.
-
-**Step 1:** Place new review CSV in `data/new_data/`
-
-**Step 2:** Run incremental fine-tuning:
-
-```bash
-python src/main.py --model sage --mode incremental \
-    --ckpt checkpoints/sage/sage_best.pt \
-    --new-data data/new_data/yelp_academic_dataset_review_healthandmedical.csv \
-    --ckpt-dir checkpoints/sage --no-amp
-```
-
-What happens:
-- Loads the trained model and entity encoders from the checkpoint
-- Detects brand-new users and businesses in the new CSV
-- Extends the embedding table (old weights preserved)
-- Fine-tunes for 20 epochs at 10% of the original learning rate
-- Mixes new interactions with a replay buffer (30%) to avoid forgetting
-- Saves a new versioned checkpoint
-
-**New-data-only mode** (skip replay buffer and old interactions):
-
-```bash
-python src/main.py --model sage --mode incremental \
-    --ckpt checkpoints/sage/sage_best.pt \
-    --new-data data/new_data/yelp_academic_dataset_review_healthandmedical.csv \
-    --ckpt-dir checkpoints/sage --no-amp --new-data-only
-```
-
----
-
-## Hyperparameter Tuning
-
-```bash
-# Tune GraphSAGE (30 Optuna trials)
-python src/main.py --model sage --mode tune \
-    --data-dir data/medium --trials 30 --no-amp
-
-# Tune GAT
-python src/main.py --model gat --mode tune \
-    --data-dir data/medium --trials 30 --no-amp
-
-# Tune LightGCN
-python src/main.py --model lightgcn --mode tune \
-    --data-dir data/medium --trials 30 --no-amp
-```
-
-Results are saved to:
-- `outputs/tuning/best_sage.yaml` — best hyperparameters
-- `outputs/tuning/study_sage.db` — full Optuna study
-- `outputs/tuning/trials_sage.csv` — trial history
-
-Train with best parameters:
-```bash
-python src/main.py --model sage --mode scratch \
-    --data-dir data/medium --epochs 100 --no-amp \
-    --ckpt-dir checkpoints/sage
-```
-
----
-
-## 4-GPU Server Training
-
-### Direct (without Docker)
-
-```bash
-torchrun --nproc_per_node=4 --standalone \
-    src/main.py --model sage --mode scratch \
-    --data-dir data/medium --ckpt-dir checkpoints/sage
-```
-
-### With Docker
-
-```bash
-# GraphSAGE
-docker compose run --rm gnn_train \
-    torchrun --nproc_per_node=4 --standalone \
-    src/main.py --model sage --mode scratch \
-    --data-dir data/medium --ckpt-dir checkpoints/sage
-
-# GAT
-docker compose run --rm gnn_train \
-    torchrun --nproc_per_node=4 --standalone \
-    src/main.py --model gat --mode scratch \
-    --data-dir data/medium --ckpt-dir checkpoints/gat
-
-# LightGCN
-docker compose run --rm gnn_train \
-    torchrun --nproc_per_node=4 --standalone \
-    src/main.py --model lightgcn --mode scratch \
-    --data-dir data/medium --ckpt-dir checkpoints/lightgcn
-
-# Incremental retraining
-docker compose run --rm gnn_train \
-    python src/main.py --model sage --mode incremental \
-    --ckpt checkpoints/sage/sage_best.pt \
-    --new-data data/new_data/yelp_academic_dataset_review_healthandmedical.csv \
-    --ckpt-dir checkpoints/sage
-```
-
----
-
-## Hardware Auto-Detection
-
-The system automatically adapts based on available hardware:
-
-| Tier | Detected when | Behaviour |
-|------|--------------|-----------|
-| `debug` | `--debug` flag | emb_dim=16, epochs=3, batch=32, AMP off |
-| `cpu` | No GPU found | batch=128, emb_dim=64, AMP off |
-| `single_gpu` | 1 GPU found | CUDA + AMP enabled, batch scaled to VRAM |
-| `multi_gpu` | 2+ GPUs found | DDP via torchrun, NCCL backend |
-
-Override any setting with CLI flags (`--epochs`, `--emb-dim`, `--lr`).
-
----
-
-## Checkpoints
-
-Checkpoints are saved in `checkpoints/<model>/`:
-
-```
-checkpoints/sage/
-  sage_best.pt          ← best validation score
-  sage_v001_e0020.pt    ← periodic save
-  sage_v002_e0040.pt
-  sage_v003_e0050.pt    ← latest
-```
-
-Each checkpoint stores:
-- Model weights (DDP-safe)
-- Optimizer + scheduler + AMP scaler state
-- Full model architecture config (for rebuilding without CLI)
-- Entity encoders (DynamicLabelEncoder — needed for incremental mode)
-- Training interactions (for incremental graph reconstruction)
-
-Load a checkpoint for evaluation:
-```bash
-python src/main.py --model sage --mode evaluate \
-    --ckpt checkpoints/sage/sage_best.pt
-```
-
----
-
-## Metrics
-
-Final evaluation reports:
-
-**Regression:**
-- RMSE and MAE (sigmoid-scaled to [1, 5] rating range)
-
-**Ranking (all users with >= 1 relevant test item):**
-- Precision@K, Recall@K, F1@K, NDCG@K, MAP@K, MRR@K, HR@K
-
-**Baselines:**
-- Popularity recommender
-- Random recommender
-
-**K-filter variant:** only includes users who have at least K test items — a stricter but more reliable evaluation.
-
----
-
-## Comparing Models
-
-After training all three models, run:
-
-```bash
-python src/main.py --model sage --mode evaluate --ckpt checkpoints/sage/sage_best.pt
-python src/main.py --model gat  --mode evaluate --ckpt checkpoints/gat/gat_best.pt
-python src/main.py --model lightgcn --mode evaluate --ckpt checkpoints/lightgcn/lightgcn_best.pt
-```
-
----
-
-## Generate Synthetic Data
-
-Generate medium dataset (2K users, 500 businesses, ~40K reviews):
-```bash
-python scripts/generate_medium_data.py
-```
-
-Generate an incremental new-batch (200 new users, ~5K reviews):
-```bash
-python scripts/generate_new_batch.py
-```
-
----
-
-## Run Tests
-
-```bash
-pip install pytest
-pytest tests/ -v
-```
-
----
-
-## Recommended Workflow
-
-```
-1.  Debug test locally
-    python src/main.py --model sage --mode scratch --data-dir data/test --debug --no-amp
-
-2.  Train all models on medium data
-    python src/main.py --model sage       --mode scratch --data-dir data/medium --epochs 100 --no-amp --ckpt-dir checkpoints/sage
-    python src/main.py --model gat        --mode scratch --data-dir data/medium --epochs 100 --no-amp --ckpt-dir checkpoints/gat
-    python src/main.py --model lightgcn   --mode scratch --data-dir data/medium --epochs 100 --no-amp --ckpt-dir checkpoints/lightgcn
-
-3.  Compare models
-    Evaluate all three and compare Precision@K / NDCG@K
-
-4.  Tune best model
-    python src/main.py --model sage --mode tune --data-dir data/medium --trials 30 --no-amp
-
-5.  Retrain with best config on full data
-    python src/main.py --model sage --mode scratch --data-dir data/raw --epochs 200 --ckpt-dir checkpoints/sage
-
-6.  Deploy to 4-GPU server via Docker
-    docker compose run --rm gnn_train torchrun --nproc_per_node=4 --standalone src/main.py ...
-
-7.  When new data arrives: incremental retraining (minutes, not hours)
-    python src/main.py --model sage --mode incremental --ckpt checkpoints/sage/sage_best.pt --new-data data/new_data/...
-```
-
----
-
-## Troubleshooting
-
-**`FileNotFoundError: checkpoints/.../sage_best.pt`**
-The scratch training must complete before incremental mode. Ensure the training finished and printed `[Checkpoint] New best -> sage_best.pt`.
-
-**`min_epochs > num_epochs` — validation never ran**
-Use `--epochs` value higher than the default `min_epochs` (80). For quick tests use `--debug` or `--epochs 50`.
-
-**`RuntimeError: NCCL backend not available`**
-NCCL requires NVIDIA GPUs. On CPU-only machines, DDP is not supported — run without `torchrun`.
-
-**`SBERT warning: embeddings.position_ids UNEXPECTED`**
-Safe to ignore — this is a model architecture mismatch warning from sentence-transformers, does not affect functionality.
-
-**`OOM (CUDA out of memory)`**
-Reduce `--emb-dim` or use `--no-amp` to disable AMP. The system will retry with half batch size automatically.
-
-**Low Precision@K metrics**
-- Use more epochs (100+) for meaningful convergence
-- Check that the test set is not too sparse (use medium or raw dataset, not test dataset)
-- Run baselines to verify GNN beats random recommender
-
----
-
-## Citation / Credits
-
-Models implemented based on:
-- GraphSAGE: Hamilton et al., 2017
-- GAT: Veličković et al., 2018
-- LightGCN: He et al., 2020
-- BPR Loss: Rendle et al., 2009
+## Références
+
+- **GraphSAGE** : Hamilton et al., NeurIPS 2017
+- **GAT** : Veličković et al., ICLR 2018
+- **LightGCN** : He et al., SIGIR 2020
+- **BPR** : Rendle et al., UAI 2009

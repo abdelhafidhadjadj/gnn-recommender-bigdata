@@ -1,7 +1,8 @@
 # ── Production GPU image ──────────────────────────────────────────────────────
-# Target hardware: 4x RTX 2080 Ti (Turing, Compute Capability 7.5)
-# Host driver:     CUDA 12.4
-# Container base:  CUDA 12.1 (forward-compatible with 12.4 host driver)
+# Target hardware (local):  RTX 3070 Laptop (Ampere, Compute Capability 8.6)
+# Target hardware (server): 4x GPU (set TORCH_CUDA_ARCH_LIST accordingly)
+# Host driver:     CUDA 12.x
+# Container base:  CUDA 12.1 (forward-compatible)
 #
 # Build:  docker build -f docker/Dockerfile.prod -t gnn-rec:prod .
 # Run single GPU:
@@ -13,10 +14,11 @@
 # Run 4-GPU DDP (via docker-compose):
 #   docker compose -f docker/docker-compose.yml up
 # ──────────────────────────────────────────────────────────────────────────────
-FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
 
-# RTX 2080 Ti = Turing (CC 7.5) — only compile for this arch to save space
-ENV TORCH_CUDA_ARCH_LIST="7.5"
+# RTX 3070 Laptop = Ampere (CC 8.6)
+# For 4-GPU server: set TORCH_CUDA_ARCH_LIST to match server GPU arch
+ENV TORCH_CUDA_ARCH_LIST="8.6"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir torch-geometric
 RUN pip install --no-cache-dir \
     torch-scatter torch-sparse torch-cluster \
-    -f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+    -f https://data.pyg.org/whl/torch-2.4.0+cu124.html
 
 # FAISS-GPU (CUDA 12.x compatible)
 RUN pip install --no-cache-dir faiss-gpu-cu12
@@ -41,8 +43,8 @@ RUN pip install --no-cache-dir \
     optuna \
     pandas numpy scikit-learn
 
-# NCCL tuning for PCIe topology (RTX 2080 Ti has no NVLink)
-# P2P access via PCIe; SHM fallback for intra-node
+# NCCL tuning for PCIe topology (no NVLink on laptop)
+# For server with NVLink: set NCCL_P2P_LEVEL=NVL
 ENV NCCL_P2P_LEVEL=NVL
 ENV NCCL_SHM_DISABLE=0
 ENV NCCL_SOCKET_IFNAME=eth0

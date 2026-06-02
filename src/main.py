@@ -38,7 +38,7 @@ import torch
 
 # ── project imports ────────────────────────────────────────────────────────────
 from config import Config
-from data.loader import load_raw_data
+from data.loader import load_raw_data, load_via_spark
 from data.preprocessing import preprocess, build_train_test
 from data.graph_builder import build_ui_edges, build_graph
 from models import build_model
@@ -95,6 +95,9 @@ def parse_args() -> argparse.Namespace:
     # Incremental options
     p.add_argument("--new-data-only", action="store_true",
                    help="Incremental mode: train on new CSV only, skip old interactions and replay buffer")
+    p.add_argument("--finetune-epochs",   type=int,   default=None, help="Override incremental finetune epochs")
+    p.add_argument("--finetune-lr-scale", type=float, default=None, help="Override incremental LR scale")
+    p.add_argument("--replay-ratio",      type=float, default=None, help="Override incremental replay ratio")
 
     # Tuning options
     p.add_argument("--trials",   type=int, default=None,
@@ -106,6 +109,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-k",    type=int, default=10,
                    help="Number of recommendations to return (--mode recommend)")
 
+    # Dataset size limits (override config defaults)
+    p.add_argument("--max-reviews", type=int, default=None,
+                   help="Max number of reviews to load (e.g. 1000, 5000, 50000, None=all)")
+    p.add_argument("--max-users",   type=int, default=None,
+                   help="Max number of users to load (None=all)")
+
     # Config file (YAML)
     p.add_argument("--config", default=None,
                    help="Path to YAML config file (applied after hardware defaults, "
@@ -114,6 +123,15 @@ def parse_args() -> argparse.Namespace:
     # Output options
     p.add_argument("--output-dir", default="outputs",
                    help="Root for metrics/plots/tuning output (default: outputs)")
+
+    # Graph mode override (full_batch | neighbor_loader | auto)
+    p.add_argument("--graph-mode", default=None,
+                   choices=["auto", "full_batch", "neighbor_loader"],
+                   help="Override graph training mode (default: auto — selected by hardware)")
+
+    # SBERT warm-start toggle
+    p.add_argument("--no-sbert-init", action="store_true",
+                   help="Disable SBERT item embedding warm-start (Xavier random init instead)")
 
     return p.parse_args()
 
@@ -132,17 +150,24 @@ def _apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> None:
     cfg.ckpt.dir      = args.ckpt_dir
 
     # Optional per-run overrides
-    if args.epochs:   cfg.train.num_epochs           = args.epochs
-    if args.emb_dim:  cfg.model.emb_dim              = args.emb_dim
-    if args.lr:       cfg.train.lr                   = args.lr
+    if args.epochs:       cfg.train.num_epochs   = args.epochs
+    if args.emb_dim:      cfg.model.emb_dim      = args.emb_dim
+    if args.lr:           cfg.train.lr           = args.lr
+    if args.max_reviews is not None: cfg.data.max_reviews = args.max_reviews
+    if args.max_users   is not None: cfg.data.max_users   = args.max_users
+    if args.graph_mode  is not None: cfg.graph_mode            = args.graph_mode
+    if args.no_sbert_init:           cfg.graph.use_sbert_item_init = False
 
     # Ensure min_epochs never exceeds num_epochs so validation always fires.
     cfg.train.min_epochs = min(cfg.train.min_epochs,
                                max(0, cfg.train.num_epochs - cfg.train.eval_every))
-    if args.ckpt:          cfg.incremental.ckpt_path      = args.ckpt
-    if args.new_data:      cfg.incremental.new_data_csv   = args.new_data
-    if args.new_data_only: cfg.incremental.new_data_only  = True
-    if args.trials:        cfg.tune.n_trials              = args.trials
+    if args.ckpt:               cfg.incremental.ckpt_path        = args.ckpt
+    if args.new_data:           cfg.incremental.new_data_csv     = args.new_data
+    if args.new_data_only:      cfg.incremental.new_data_only    = True
+    if args.trials:             cfg.tune.n_trials                = args.trials
+    if args.finetune_epochs:    cfg.incremental.finetune_epochs  = args.finetune_epochs
+    if args.finetune_lr_scale:  cfg.incremental.finetune_lr_scale = args.finetune_lr_scale
+    if args.replay_ratio is not None: cfg.incremental.replay_ratio = args.replay_ratio
 
 
 # ── YAML config loading ────────────────────────────────────────────────────────
@@ -194,9 +219,43 @@ def _apply_yaml(cfg: Config, path: str) -> None:
 
 # ── data pipeline ──────────────────────────────────────────────────────────────
 
-def prepare_data(cfg: Config, embed_device: torch.device):
-    print("\n[Data] Loading CSVs ...")
-    bdf, udf, rdf = load_raw_data(cfg.data)
+def prepare_data(
+    cfg: Config,
+    embed_device: torch.device,
+    world_size: int = 1,
+    rank: int = 0,
+):
+    """
+    Load raw data and build the training graph.
+
+    Loading backend is selected automatically:
+      world_size == 1  →  pandas  (standard mode, fast for small data)
+      world_size  > 1  →  PySpark (bigdata mode, distributed I/O)
+
+    t_load reflects actual I/O time for the active backend so that the
+    compare_distributed.py report shows a meaningful pandas vs Spark delta.
+    """
+    import time as _time
+    timings = {}
+
+    if world_size > 1:
+        # ── bigdata mode : load via Spark ─────────────────────────────────────
+        if rank == 0:
+            print(f"\n[Data] Loading CSVs via Spark  (world_size={world_size}) ...")
+        t0 = _time.perf_counter()
+        bdf, udf, rdf = load_via_spark(cfg.data, rank=rank)
+        timings["t_load"] = round(_time.perf_counter() - t0, 2)
+        timings["loader"] = "spark"
+        if rank == 0:
+            print(f"       t_load = {timings['t_load']}s  [Spark local[1] per rank]")
+    else:
+        # ── standard mode : load via pandas ──────────────────────────────────
+        print("\n[Data] Loading CSVs via pandas  (world_size=1) ...")
+        t0 = _time.perf_counter()
+        bdf, udf, rdf = load_raw_data(cfg.data)
+        timings["t_load"] = round(_time.perf_counter() - t0, 2)
+        timings["loader"] = "pandas"
+        print(f"       t_load = {timings['t_load']}s  [pandas]")
 
     print("[Data] Preprocessing ...")
     review_df, review_df_full, user_enc, item_enc, n_users, n_items = preprocess(
@@ -223,6 +282,7 @@ def prepare_data(cfg: Config, embed_device: torch.device):
     )
 
     print("[Graph] Building training graph (train edges only, no leakage) ...")
+    t0 = _time.perf_counter()
     train_ei = uei[:, train_idx]
     train_ev = uev[train_idx]
     train_rf = review_df_full.iloc[train_idx].reset_index(drop=True)
@@ -235,6 +295,8 @@ def prepare_data(cfg: Config, embed_device: torch.device):
         torch.device("cpu"),
         cfg.graph,
     )
+    timings["t_graph"] = round(_time.perf_counter() - t0, 2)
+    print(f"       t_graph = {timings['t_graph']}s")
     gc.collect()
 
     df_train  = review_df.iloc[train_idx].copy()
@@ -247,6 +309,7 @@ def prepare_data(cfg: Config, embed_device: torch.device):
         n_users, n_items, num_nodes,
         user_enc, item_enc,
         bdf_ordered,        # returned for SBERT warm-start in run_scratch
+        timings,
     )
 
 
@@ -304,16 +367,20 @@ def run_scratch(
     ).to(device)
 
     # ── SBERT warm-start (all ranks run identically → same seed → same result)
+    import time as _time
+    t_sbert = 0.0
     if cfg.graph.use_sbert_item_init and bdf_ordered is not None:
         if is_main_process(rank):
             print("[SBERT] Warm-starting item embeddings from category text ...")
+        _t0 = _time.perf_counter()
         item_proj = build_sbert_item_projections(
             bdf_ordered, cfg.model.emb_dim, dev.embed_device, cfg.graph, seed=cfg.seed
         )
+        t_sbert = round(_time.perf_counter() - _t0, 2)
         warm_start_item_embeddings(model, item_proj, n_users)
         barrier()    # all ranks sync after warm-start before DDP wrap
         if is_main_process(rank):
-            print(f"[SBERT] Item rows initialised  ({n_items} items, emb_dim={cfg.model.emb_dim})")
+            print(f"[SBERT] Item rows initialised  ({n_items} items, emb_dim={cfg.model.emb_dim})  t_sbert={t_sbert}s")
 
     # ── DDP wrap (must happen AFTER SBERT warm-start) ─────────────────────────
     if is_ddp:
@@ -331,7 +398,14 @@ def run_scratch(
         with torch.no_grad():
             # In DDP m is a DDP-wrapped model; forward still works normally
             ranking = compute_ranking_metrics(m, edge_idx, df_val, n_users, cfg.eval)
-        score = ranking.get(cfg.eval.k_list[0], {}).get("NDCG", 0.0)
+        # Composite criterion (eq. 3.21): 0.4×NDCG@K + 0.3×P@K + 0.3×R@K
+        k   = cfg.eval.k_list[0]
+        met = ranking.get(k, {})
+        score = (
+            cfg.tune.ndcg_w * met.get("NDCG", 0.0)
+            + cfg.tune.prec_w * met.get("P",    0.0)
+            + cfg.tune.rec_w  * met.get("R",    0.0)
+        )
         barrier()    # sync all ranks before training resumes
         return score
 
@@ -345,14 +419,17 @@ def run_scratch(
 
     # ── build train_interactions for checkpoint (needed by incremental mode) ────
     train_interactions_extra = {
+        "n_users": n_users,
+        "n_items": n_items,
         "train_interactions": {
             "user_ids":       df_train["user_id"].values.astype("int32"),
             "item_ids_local": (df_train["item_id"].values - n_users).astype("int32"),
             "ratings":        df_train["rating"].values.astype("float32"),
-        }
+        },
     }
 
     # ── training ──────────────────────────────────────────────────────────────
+    _t0_train = _time.perf_counter()
     try:
         history = train_model(
             model, optimizer, edge_idx, t_u, t_pos,
@@ -396,11 +473,16 @@ def run_scratch(
         rank=rank,
     )
 
+    t_train = round(_time.perf_counter() - _t0_train, 2)
+
     # ── final evaluation on test set — rank 0 only ────────────────────────────
     results = None
     if is_main_process(rank):
         print("\n[Eval] Final evaluation on held-out test set ...")
-        results = evaluate_model(model, edge_idx, df_test, n_users, cfg.eval)
+        _t0_eval = _time.perf_counter()
+        results = evaluate_model(model, edge_idx, df_test, n_users, cfg.eval,
+                                 df_train=df_train)
+        t_eval = round(_time.perf_counter() - _t0_eval, 2)
         print_evaluation(results)
 
         print("\n[Baselines]")
@@ -422,6 +504,18 @@ def run_scratch(
         )
         if curve_path:
             print(f"[Output] Training curve  -> {curve_path}")
+
+        # Ajouter les timings système aux métriques
+        results["timings"] = {
+            "t_sbert":    t_sbert,
+            "t_train":    t_train,
+            "t_eval":     t_eval,
+            "world_size": world_size,
+            "loader":     "spark" if world_size > 1 else "pandas",
+        }
+        # Ajouter les timings data/graph (t_load, t_graph, loader) si disponibles
+        if hasattr(cfg, "_data_timings"):
+            results["timings"].update(cfg._data_timings)
 
         metrics_path = save_metrics_json(
             results    = results,
@@ -590,7 +684,9 @@ def main() -> None:
         n_users, n_items, num_nodes,
         user_enc, item_enc,
         bdf_ordered,
-    ) = prepare_data(cfg, dev.embed_device)
+        data_timings,
+    ) = prepare_data(cfg, dev.embed_device, world_size=world_size, rank=rank)
+    cfg._data_timings = data_timings   # transmis à run_scratch pour le JSON
 
     # ── 9. Resolve graph mode + build loader if needed (Phase 4) ─────────────
     resolved_graph_mode = resolve_graph_mode(profile, cfg, num_nodes, cfg.model.emb_dim)

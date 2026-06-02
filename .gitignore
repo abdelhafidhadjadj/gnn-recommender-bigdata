@@ -1,3 +1,6 @@
+# SBERT embedding cache
+.sbert_cache/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -27,6 +30,11 @@ checkpoints/
 data/raw/
 data/processed/
 data/new_data/
+data/1k/
+data/5k/
+data/10k/
+data/40k/
+data/incremental/
 # Keep test and medium data in git for reproducibility
 !data/test/
 !data/medium/
@@ -37,6 +45,21 @@ outputs/plots/
 outputs/reports/
 outputs/tuning/*.db
 outputs/tuning/*.csv
+# Benchmark results (generated — trop volumineux)
+outputs/gat_w*/
+outputs/lightgcn_w*/
+outputs/sage_w*/
+outputs/report.html
+
+# Generated JSON snapshots
+existing_items.json
+existing_users.json
+
+# Archives
+pipeline.zip
+
+# Claude Code session
+.claude/
 
 # Optuna databases
 *.db
@@ -71,3 +94,4 @@ coverage.xml
 
 # Ruff / Black
 .ruff_cache/
+pyspark-*.tar.gz

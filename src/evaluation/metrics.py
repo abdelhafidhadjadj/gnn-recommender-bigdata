@@ -99,6 +99,7 @@ def compute_ranking_metrics(
     n_users: int,
     cfg: EvalConfig,
     use_k_filter: bool = False,
+    exclude_seen: dict | None = None,
 ) -> dict:
     """
     Compute ranking metrics at every K in cfg.k_list.
@@ -145,7 +146,13 @@ def compute_ranking_metrics(
         accum: dict[str, list] = {m: [] for m in _METRICS}
         for uid in candidates:
             if uid not in score_cache:
-                score_cache[uid] = torch.mv(ie, ue[uid]).detach().numpy()
+                scores = torch.mv(ie, ue[uid]).detach().numpy().copy()
+                # ── Exclure les items vus en training (standard CF protocol) ──
+                # Sans ça, BPR met les training items tout en haut et les
+                # test items (différents après dedup) ne sortent jamais dans top-K.
+                if exclude_seen and uid in exclude_seen:
+                    scores[list(exclude_seen[uid])] = -np.inf
+                score_cache[uid] = scores
             ranked = np.argsort(-score_cache[uid])
             per_k  = _ranking_scores(user_rel[uid], ranked, [k])
             for m, v in per_k[k].items():
@@ -168,7 +175,8 @@ def compute_ranking_metrics(
 
 def evaluate_model(model, full_edge_index: torch.Tensor,
                    df_test: pd.DataFrame, n_users: int,
-                   cfg: EvalConfig) -> dict:
+                   cfg: EvalConfig,
+                   df_train: pd.DataFrame | None = None) -> dict:
     """
     Full evaluation: regression metrics + binary classification + ranking.
 
@@ -211,9 +219,19 @@ def evaluate_model(model, full_edge_index: torch.Tensor,
     # Mirrors the notebook's evaluate_model precision_global.
     global_prec = float(precision_score(true_bin, pred_bin, zero_division=0))
 
+    # ── Construire l'ensemble des items vus en training (pour exclusion) ─────
+    exclude_seen: dict | None = None
+    if df_train is not None:
+        exclude_seen = {}
+        uid_tr = df_train['user_id'].values.astype(int)
+        iid_tr = (df_train['item_id'].values - n_users).astype(int)
+        for uid, iid in zip(uid_tr, iid_tr):
+            exclude_seen.setdefault(int(uid), set()).add(int(iid))
+
     # Ranking: all users with >= 1 relevant item (standard CF evaluation)
     ranking = compute_ranking_metrics(
-        model, full_edge_index, df_test, n_users, cfg, use_k_filter=False
+        model, full_edge_index, df_test, n_users, cfg,
+        use_k_filter=False, exclude_seen=exclude_seen,
     )
 
     result: dict = {
@@ -227,7 +245,8 @@ def evaluate_model(model, full_edge_index: torch.Tensor,
     # K-filtered ranking: for each K, restrict to users with >= K test items
     if getattr(cfg, "use_k_filter", False):
         result["ranking_kfiltered"] = compute_ranking_metrics(
-            model, full_edge_index, df_test, n_users, cfg, use_k_filter=True
+            model, full_edge_index, df_test, n_users, cfg,
+            use_k_filter=True, exclude_seen=exclude_seen,
         )
 
     return result

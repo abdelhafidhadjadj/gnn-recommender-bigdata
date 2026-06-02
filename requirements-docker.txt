@@ -1,0 +1,20 @@
+# Dépendances pour l'image Docker GPU
+# torch et torchvision sont déjà dans l'image de base pytorch/pytorch
+# faiss-gpu et torch-scatter/sparse installés séparément dans le Dockerfile
+
+torch-geometric>=2.4
+# pyspark installé séparément depuis fichier local (voir Dockerfile)
+# transformers épinglé à 4.44.x — compatible PyTorch 2.4.0 (base image)
+# versions plus récentes requièrent torch.distributed.tensor (PyTorch 2.5+)
+transformers==4.44.2
+sentence-transformers==3.0.1
+optuna>=3.0
+pandas>=1.5
+numpy>=1.24
+scikit-learn>=1.2
+pyyaml>=6.0
+matplotlib>=3.7
+seaborn>=0.12
+plotly>=5.0
+streamlit>=1.35
+pytest>=7.0

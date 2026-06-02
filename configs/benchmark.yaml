@@ -1,0 +1,45 @@
+# ── Benchmark experiment matrix ────────────────────────────────────────────────
+#
+#  Two modes:
+#
+#  STANDARD (baseline):
+#    preprocessing : pandas (no Spark, no HDFS)
+#    GPU training  : 1 partition × 2 GB
+#    total runs    : len(dataset_sizes) × len(models)
+#                  = 4 × 3 = 12 runs
+#
+#  BIG DATA:
+#    preprocessing : Spark with N workers on HDFS
+#    GPU training  : N partitions × 2 GB  (n_partitions = n_workers)
+#    total runs    : len(n_workers) × len(dataset_sizes) × len(models)
+#                  = 3 × 4 × 3 = 36 runs
+#
+#  GRAND TOTAL: 48 runs
+#
+experiments:
+  n_workers:     [2, 3, 4]             # Spark workers AND GPU partitions (tied)
+  dataset_sizes: ["1k", "5k", "10k", "full"]
+  models:        ["sage", "gat", "lightgcn"]
+  n_epochs:      200
+
+# ── Data paths ─────────────────────────────────────────────────────────────────
+# Single CSV source — never modified
+data_source_local:        "data/medium"
+data_mount_in_container:  "/workspace/data/medium"
+processed_base:           "/workspace/processed"     # inside containers
+
+# ── GPU partitioning ──────────────────────────────────────────────────────────
+gpu:
+  mem_per_partition_gb: 2        # fixed 2 GB per partition
+  # Standard: 1 partition → 2 GB used (25% of RTX 3070 8 GB)
+  # BigData N: N partitions → N×2 GB used (50% / 75% / 100%)
+
+# ── Spark config ───────────────────────────────────────────────────────────────
+spark:
+  executor_memory: "2g"
+  executor_cores:  2
+  driver_memory:   "1g"
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+monitor:
+  interval_sec: 2

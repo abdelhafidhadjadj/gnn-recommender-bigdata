@@ -20,8 +20,8 @@ class DataConfig:
     business_file: str = "yelp_academic_dataset_business_healthandmedical.csv"
     user_file: str = "yelp_academic_dataset_user_healthandmedical.csv"
     review_file: str = "yelp_academic_dataset_review_healthandmedical.csv"
-    max_users: int = 50_000
-    max_reviews: int = 80_000
+    max_users: int = 0        # 0 = no limit (load all)
+    max_reviews: int = 0      # 0 = no limit (load all)
     val_size: float = 0.15    # 70 / 15 / 15 split
     test_size: float = 0.15
     random_state: int = 1
@@ -42,7 +42,7 @@ class GraphConfig:
     # SBERT warm-start: initialise item embedding rows with projected SBERT vectors.
     # Items start content-aware (categories text); BPR fine-tunes from there.
     # Users keep Xavier random init (no text features available).
-    use_sbert_item_init: bool = True
+    use_sbert_item_init: bool = True   # warm-start items avec SBERT (catégories text → emb_dim)
     # Neighbor sampling depth for LinkNeighborLoader (Phase 4)
     num_neighbors: List[int] = field(default_factory=lambda: [15, 10])
 
@@ -101,8 +101,8 @@ class TuneConfig:
 @dataclass
 class EvalConfig:
     k_list: List[int] = field(default_factory=lambda: [5, 10, 20])
-    max_eval_users: int = 500
-    relevance_thresh: float = 4.0
+    max_eval_users: int = 5000
+    relevance_thresh: float = 3.0   # 3.0 = tout item interagi est pertinent (dataset médical sparse)
     # Phase 2 additions (metrics overhaul) — kept as config now, wired in P2
     use_global_precision: bool = True
     use_k_filter: bool = True        # only evaluate users with ≥K test interactions

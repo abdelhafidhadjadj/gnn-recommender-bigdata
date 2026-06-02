@@ -105,12 +105,47 @@ def make_train_loader(
     if num_workers > 0:
         loader_kwargs["prefetch_factor"] = 2
 
-    return LinkNeighborLoader(
-        data               = pyg_data,
-        num_neighbors      = num_neighbors,
-        edge_label_index   = train_edge_index.cpu(),   # supervision edges
-        neg_sampling_ratio = 0.0,                      # BPR handles negatives itself
-        batch_size         = batch_size,
-        shuffle            = True,
-        **loader_kwargs,
-    )
+    # disjoint=True évite le data leakage mais requiert pyg-lib.
+    # Fallback : on passe un graphe MP sans les arêtes de supervision
+    # → même effet sans pyg-lib.
+    try:
+        return LinkNeighborLoader(
+            data               = pyg_data,
+            num_neighbors      = num_neighbors,
+            edge_label_index   = train_edge_index.cpu(),
+            neg_sampling_ratio = 0.0,
+            batch_size         = batch_size,
+            shuffle            = True,
+            disjoint           = True,          # requiert pyg-lib
+            **loader_kwargs,
+        )
+    except (TypeError, ValueError):
+        # pyg-lib absent — disjoint non supporté.
+        # Solution : retenir 80 % des arêtes pour le message-passing,
+        # utiliser les 20 % restants comme arêtes de supervision.
+        # Les arêtes de supervision ne sont donc jamais dans le graphe MP → pas de leakage.
+        n_total   = pyg_data.num_nodes
+        n_sup     = train_edge_index.size(1)
+        perm      = torch.randperm(n_sup)
+        n_mp      = int(0.80 * n_sup)
+        mp_idx    = perm[:n_mp]                      # 80 % pour MP
+        sup_idx   = perm[n_mp:]                      # 20 % pour supervision BPR
+
+        mp_edges  = train_edge_index[:, mp_idx]
+        sup_edges = train_edge_index[:, sup_idx]
+
+        # Graphe MP bidirectionnel sur les 80 % d'arêtes
+        mp_edge_index = torch.cat([mp_edges, mp_edges.flip(0)], dim=1)
+
+        from torch_geometric.data import Data
+        mp_data = Data(edge_index=mp_edge_index.cpu(), num_nodes=n_total)
+
+        return LinkNeighborLoader(
+            data               = mp_data,
+            num_neighbors      = num_neighbors,
+            edge_label_index   = sup_edges.cpu(),    # supervision = 20 % sans leakage
+            neg_sampling_ratio = 0.0,
+            batch_size         = batch_size,
+            shuffle            = True,
+            **loader_kwargs,
+        )

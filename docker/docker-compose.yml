@@ -19,21 +19,45 @@
 # ─────────────────────────────────────────────────────────────────────────────
 version: "3.9"
 
+# ── Réseau externe (pipeline/docker-compose.yml) ──────────────────────────────
+# Démarrer HDFS + Spark avant de lancer le trainer :
+#   cd pipeline && docker compose up -d namenode datanode1 datanode2 spark-master spark-worker
+# Puis uploader les données :
+#   bash scripts/hdfs_upload.sh --size 1k
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  pipeline_net:
+    external: true
+    name: pipeline_pipeline_net   # <project>=pipeline, <network>=pipeline_net
+
 services:
   trainer:
+    image: gnn-rec:prod
     build:
       context: ..
-      dockerfile: docker/Dockerfile.prod
+      dockerfile: Dockerfile
 
-    # torchrun launches 4 worker processes inside this single container
+    # Rejoindre le réseau pipeline pour accéder à namenode:9000 + spark-master:7077
+    networks:
+      - pipeline_net
+
+    entrypoint: torchrun
+
+    # Chaque worker utilise toujours 2 GB fixe — comparaison équitable :
+    # WORLD_SIZE=1 → standard    (1 worker  × 2 GB)
+    # WORLD_SIZE=2 → bigdata x2  (2 workers × 2 GB = 4 GB utilisés)
+    # WORLD_SIZE=4 → bigdata x4  (4 workers × 2 GB = 8 GB utilisés)
     command: >
-      torchrun
-      --nproc_per_node=${WORLD_SIZE:-4}
+      --nproc_per_node=${WORLD_SIZE:-1}
       --standalone
       src/main.py
-      --mode  ${TRAINING_MODE:-scratch}
-      --model ${MODEL_TYPE:-sage}
-      --seed  ${SEED:-42}
+      --mode        ${TRAINING_MODE:-scratch}
+      --model       ${MODEL_TYPE:-sage}
+      --data-dir    ${DATA_DIR:-data/raw/50k}
+      --ckpt-dir    checkpoints/${MODEL_TYPE:-sage}_w${WORLD_SIZE:-1}_${SIZE:-50k}
+      --output-dir  outputs/${MODEL_TYPE:-sage}_w${WORLD_SIZE:-1}_${SIZE:-50k}
+      --seed        ${SEED:-42}
+      --graph-mode  ${GRAPH_MODE:-auto}
 
     # Required for NCCL shared-memory communication between GPU processes
     ipc: host
@@ -52,18 +76,36 @@ services:
 
     # Mount host paths for data and checkpoints (survives container restart)
     volumes:
+      - ../src:/workspace/src                                      # code source — pas besoin de rebuild
       - ../data:/workspace/data
       - ../checkpoints:/workspace/checkpoints
+      - ../outputs:/workspace/outputs
+      - ../.sbert_cache:/workspace/.sbert_cache                    # cache embeddings SBERT persistant
+      - ${USERPROFILE}/.cache/huggingface:/root/.cache/huggingface # modèle HuggingFace offline
 
-    # Env vars — override via docker/.env or CLI
+    # Env vars — override via docker/.env ou CLI
     environment:
-      - WORLD_SIZE=${WORLD_SIZE:-4}
+      - WORLD_SIZE=${WORLD_SIZE:-1}
       - MASTER_ADDR=localhost
       - MASTER_PORT=${MASTER_PORT:-29500}
       - TRAINING_MODE=${TRAINING_MODE:-scratch}
       - MODEL_TYPE=${MODEL_TYPE:-sage}
+      - DATA_DIR=${DATA_DIR:-data/raw/50k}
+      - CKPT_DIR=${CKPT_DIR:-checkpoints}
+      - SIZE=${SIZE:-50k}
       - SEED=${SEED:-42}
-      - CUDA_VISIBLE_DEVICES=0,1,2,3
+      - CUDA_VISIBLE_DEVICES=0
+      # ── Bigdata mode (world_size > 1) ────────────────────────────────────────
+      # SPARK_MASTER=local[N] : Spark tourne dans le container trainer lui-même.
+      # Pas de cluster externe → pas de conflit de version Spark.
+      # Pour utiliser un cluster externe : SPARK_MASTER=spark://spark-master:7077
+      # (requiert la même version pyspark que le cluster)
+      # Spark local[N] : computation dans le container, I/O depuis HDFS
+      - SPARK_MASTER=local[${WORLD_SIZE:-1}]
+      - HDFS_URL=hdfs://namenode:9000
+      # Mode offline HuggingFace — utilise le cache monté, pas d'internet
+      - TRANSFORMERS_OFFLINE=1
+      - HF_DATASETS_OFFLINE=1
 
     # Log output to stdout (visible with `docker compose logs -f`)
     logging:
