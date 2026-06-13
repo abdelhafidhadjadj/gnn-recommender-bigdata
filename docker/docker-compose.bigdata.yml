@@ -1,26 +1,46 @@
 # ── Big Data Distributed Stack ────────────────────────────────────────────────
 #
-#  Images officielles :
-#    HDFS    : bde2020/hadoop-namenode + hadoop-datanode
-#    Spark   : apache/spark-py:3.5.3  (image officielle Apache)
-#    Trainer : pytorch/pytorch + CUDA (Dockerfile.benchmark)
-#    Monitor : prom/prometheus + grafana/grafana
+#  Services:
+#    HDFS  : namenode + datanode
+#    Spark : master + N workers (scale with N_WORKERS env var)
+#    Trainer: PyTorch GPU container (reads Spark output, trains GNN)
+#    Monitoring: Prometheus + Grafana + Node-exporter
 #
 #  Usage:
+#    # 2 Spark workers
+#    N_WORKERS=2 docker compose -f docker/docker-compose.bigdata.yml up --scale spark-worker=2
+#
+#    # 4 Spark workers
+#    N_WORKERS=4 docker compose -f docker/docker-compose.bigdata.yml up --scale spark-worker=4
+#
+#  Or use the benchmark script:
 #    bash scripts/run_benchmark.sh
-#    # ou manuellement :
-#    docker compose -f docker/docker-compose.bigdata.yml up -d --scale spark-worker=2
 # ─────────────────────────────────────────────────────────────────────────────
 
-x-spark-common: &spark-common
-  build:
-    context: ..
-    dockerfile: docker/Dockerfile.spark
-  user: root
+version: "3.9"
+
+# ── Shared Spark worker template ──────────────────────────────────────────────
+x-spark-worker: &spark-worker-base
+  image: bitnami/spark:3.5
+  environment:
+    - SPARK_MODE=worker
+    - SPARK_MASTER_URL=spark://spark-master:7077
+    - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-3G}
+    - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
+    - SPARK_RPC_AUTHENTICATION_ENABLED=no
+    - SPARK_RPC_ENCRYPTION_ENABLED=no
+    - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+    - SPARK_SSL_ENABLED=no
+    - HADOOP_CONF_DIR=/opt/hadoop/conf
   volumes:
+    - ../data:/data:ro
     - ../spark:/opt/spark-apps:ro
-    - ../data/medium:/input-data:ro
     - processed-data:/processed
+    - spark-logs:/opt/bitnami/spark/logs
+    - ./hadoop:/opt/hadoop/conf:ro
+  depends_on:
+    spark-master:
+      condition: service_healthy
   networks:
     - gnn-net
 
@@ -32,11 +52,11 @@ services:
     container_name: namenode
     hostname: namenode
     ports:
-      - "9870:9870"
-      - "9000:9000"
+      - "9870:9870"    # HDFS Web UI
+      - "9000:9000"    # HDFS RPC
     volumes:
       - hdfs-namenode:/hadoop/dfs/name
-      - ../data/medium:/input-data:ro
+      - ../data/medium:/input-data:ro    # source unique, jamais modifié
     environment:
       - CLUSTER_NAME=gnn-cluster
       - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
@@ -69,78 +89,55 @@ services:
 
   # ── Spark Master ─────────────────────────────────────────────────────────────
   spark-master:
-    <<: *spark-common
+    image: bitnami/spark:3.5
     container_name: spark-master
     hostname: spark-master
-    command: >
-      /opt/spark/bin/spark-class
-      org.apache.spark.deploy.master.Master
-      --host spark-master
-      --port 7077
-      --webui-port 8080
-    ports:
-      - "8080:8080"
-      - "7077:7077"
-      - "4040:4040"
     environment:
-      - SPARK_MASTER_HOST=spark-master
-      - SPARK_LOCAL_IP=spark-master
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
+    ports:
+      - "8080:8080"    # Spark Master Web UI
+      - "7077:7077"    # Spark Master RPC
+      - "4040:4040"    # Spark App UI
+    volumes:
+      - ../spark:/opt/spark-apps:ro
+      - ../data:/data:ro
+      - processed-data:/processed
+      - spark-logs:/opt/bitnami/spark/logs
+      - ./hadoop:/opt/hadoop/conf:ro
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.socket(); s.settimeout(3); s.connect(('spark-master',8080)); s.close()\""]
-      interval: 15s
+      test: ["CMD", "curl", "-sf", "http://localhost:8080"]
+      interval: 20s
       timeout: 10s
       retries: 10
       start_period: 30s
+    networks:
+      - gnn-net
 
-  # ── Spark Workers (4 workers fixes, visibles dans l'UI Spark) ───────────────
-  x-spark-worker: &spark-worker-common
-    <<: *spark-common
-    environment:
-      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-3g}
-      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
-    depends_on:
-      spark-master:
-        condition: service_healthy
-
+  # ── Spark Workers (4 workers fixes — visibles dans l'UI Spark) ──────────────
   spark-worker-1:
-    <<: *spark-worker-common
+    <<: *spark-worker-base
     container_name: spark-worker-1
     hostname: spark-worker-1
-    command: >
-      /opt/spark/bin/spark-class
-      org.apache.spark.deploy.worker.Worker
-      --host spark-worker-1
-      spark://spark-master:7077
 
   spark-worker-2:
-    <<: *spark-worker-common
+    <<: *spark-worker-base
     container_name: spark-worker-2
     hostname: spark-worker-2
-    command: >
-      /opt/spark/bin/spark-class
-      org.apache.spark.deploy.worker.Worker
-      --host spark-worker-2
-      spark://spark-master:7077
 
   spark-worker-3:
-    <<: *spark-worker-common
+    <<: *spark-worker-base
     container_name: spark-worker-3
     hostname: spark-worker-3
-    command: >
-      /opt/spark/bin/spark-class
-      org.apache.spark.deploy.worker.Worker
-      --host spark-worker-3
-      spark://spark-master:7077
 
   spark-worker-4:
-    <<: *spark-worker-common
+    <<: *spark-worker-base
     container_name: spark-worker-4
     hostname: spark-worker-4
-    command: >
-      /opt/spark/bin/spark-class
-      org.apache.spark.deploy.worker.Worker
-      --host spark-worker-4
-      spark://spark-master:7077
 
   # ── GPU Trainer ──────────────────────────────────────────────────────────────
   trainer:
@@ -195,6 +192,7 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
     networks:
       - gnn-net
 
@@ -215,7 +213,7 @@ services:
     networks:
       - gnn-net
 
-  # ── Node Exporter ─────────────────────────────────────────────────────────────
+  # ── Node Exporter (CPU/RAM/Disk metrics) ─────────────────────────────────────
   node-exporter:
     image: prom/node-exporter:latest
     container_name: node-exporter
@@ -223,9 +221,11 @@ services:
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
+      - /:/rootfs:ro
     command:
       - "--path.procfs=/host/proc"
       - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
     ports:
       - "9100:9100"
     networks:
@@ -235,6 +235,7 @@ volumes:
   hdfs-namenode:
   hdfs-datanode:
   processed-data:
+  spark-logs:
   prometheus-data:
   grafana-data:
 

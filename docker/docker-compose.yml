@@ -31,6 +31,22 @@ networks:
     name: pipeline_pipeline_net   # <project>=pipeline, <network>=pipeline_net
 
 services:
+
+  demo:
+    image: gnn-rec:prod
+    entrypoint: streamlit
+    command: run demo/app.py --server.address 0.0.0.0 --server.port 8501
+    ports:
+      - "8501:8501"
+    volumes:
+      - ../checkpoints:/workspace/checkpoints
+      - ../data:/workspace/data
+      - ../demo:/workspace/demo
+      - ../outputs:/workspace/outputs
+    environment:
+      - TRANSFORMERS_OFFLINE=1
+      - HF_DATASETS_OFFLINE=1
+
   trainer:
     image: gnn-rec:prod
     build:
@@ -58,6 +74,7 @@ services:
       --output-dir  outputs/${MODEL_TYPE:-sage}_w${WORLD_SIZE:-1}_${SIZE:-50k}
       --seed        ${SEED:-42}
       --graph-mode  ${GRAPH_MODE:-auto}
+      --open-report
 
     # Required for NCCL shared-memory communication between GPU processes
     ipc: host
@@ -80,6 +97,8 @@ services:
       - ../data:/workspace/data
       - ../checkpoints:/workspace/checkpoints
       - ../outputs:/workspace/outputs
+      - ../results_final:/workspace/results_final                  # résultats protégés (post-processing)
+      - ../generate_report.py:/workspace/generate_report.py        # rapport HTML (chemin relatif)
       - ../.sbert_cache:/workspace/.sbert_cache                    # cache embeddings SBERT persistant
       - ${USERPROFILE}/.cache/huggingface:/root/.cache/huggingface # modèle HuggingFace offline
 

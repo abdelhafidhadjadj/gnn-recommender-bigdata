@@ -130,16 +130,31 @@ def recommend_cold_start(
     n_users: int,
     n_items: int,
     k: int = 10,
+    ratings: list[float] | None = None,
 ) -> list[tuple[int, float]]:
     """
-    Cold-start: simulate a new user as the average of liked items' embeddings.
+    Cold-start: simulate a new user as the weighted average of liked items' embeddings.
+
+    ratings : note donnée à chaque item (1–5). Si None, moyenne simple (tous égaux).
+              Un item noté 5⭐ a plus d'influence sur le profil qu'un item noté 1⭐.
     """
     if not liked_item_indices:
         return []
 
     item_embs = embeddings[n_users: n_users + n_items]
-    liked_vecs = np.stack([item_embs[i] for i in liked_item_indices if i < n_items])
-    user_proxy = liked_vecs.mean(axis=0)
+    valid = [(i, r) for i, r in zip(
+        liked_item_indices,
+        ratings if ratings is not None else [1.0] * len(liked_item_indices)
+    ) if i < n_items]
+
+    if not valid:
+        return []
+
+    indices, weights = zip(*valid)
+    vecs    = np.stack([item_embs[i] for i in indices])          # (n, dim)
+    weights = np.array(weights, dtype=np.float32)
+    weights = weights / weights.sum()                             # normaliser → somme = 1
+    user_proxy = (vecs * weights[:, None]).sum(axis=0)           # moyenne pondérée
 
     scores = item_embs @ user_proxy
     for i in liked_item_indices:

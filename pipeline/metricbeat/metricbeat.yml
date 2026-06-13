@@ -1,0 +1,46 @@
+# Metricbeat — Windows Docker Desktop compatible
+
+metricbeat.modules:
+  - module: docker
+    metricsets:
+      - container
+      - cpu
+      - diskio
+      - memory
+      - network
+    hosts: ["unix:///var/run/docker.sock"]
+    enabled: true
+    period: 15s
+    labels.dedot: true
+
+  - module: system
+    metricsets:
+      - cpu
+      - memory
+      - network
+      - load
+      - diskio
+    enabled: true
+    period: 15s
+    cpu.metrics: ["percentages"]
+
+processors:
+  - add_host_metadata: ~
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  indices:
+    - index: "metricbeat-docker-%{+yyyy.MM.dd}"
+      when.equals:
+        event.module: "docker"
+    - index: "metricbeat-system-%{+yyyy.MM.dd}"
+      when.equals:
+        event.module: "system"
+
+setup.template.name: "metricbeat"
+setup.template.pattern: "metricbeat-*"
+setup.ilm.enabled: false
+setup.kibana.host: "kibana:5601"
+setup.dashboards.enabled: false
+logging.level: info
+logging.to_files: false

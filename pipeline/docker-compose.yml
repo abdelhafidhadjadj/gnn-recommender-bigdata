@@ -7,6 +7,8 @@ volumes:
   hadoop_datanode1:
   hadoop_datanode2:
   elasticsearch_data:
+  filebeat_data:
+  metricbeat_data:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # KAFKA STACK
@@ -131,19 +133,150 @@ services:
     environment:
       - SPARK_NO_DAEMONIZE=true
 
-  spark-worker:
+  spark-worker-1:
     image: apache/spark:3.5.0
-    container_name: spark-worker
+    container_name: spark-worker-1
+    hostname: spark-worker-1
     networks: [pipeline_net]
     depends_on:
       - spark-master
-    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "--host", "spark-worker-1", "spark://spark-master:7077"]
     ports:
       - "8082:8081"
     environment:
       - SPARK_NO_DAEMONIZE=true
       - SPARK_WORKER_MEMORY=1g
       - SPARK_WORKER_CORES=2
+
+  spark-worker-2:
+    image: apache/spark:3.5.0
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    networks: [pipeline_net]
+    depends_on:
+      - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "--host", "spark-worker-2", "spark://spark-master:7077"]
+    ports:
+      - "8083:8081"
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=1g
+      - SPARK_WORKER_CORES=2
+
+  spark-worker-3:
+    image: apache/spark:3.5.0
+    container_name: spark-worker-3
+    hostname: spark-worker-3
+    networks: [pipeline_net]
+    depends_on:
+      - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "--host", "spark-worker-3", "spark://spark-master:7077"]
+    ports:
+      - "8084:8081"
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=1g
+      - SPARK_WORKER_CORES=2
+
+  spark-worker-4:
+    image: apache/spark:3.5.0
+    container_name: spark-worker-4
+    hostname: spark-worker-4
+    networks: [pipeline_net]
+    depends_on:
+      - spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "--host", "spark-worker-4", "spark://spark-master:7077"]
+    ports:
+      - "8085:8081"
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - SPARK_WORKER_MEMORY=1g
+      - SPARK_WORKER_CORES=2
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRODUCERS — Collecte automatique des articles (PubMed + ArXiv)
+# ─────────────────────────────────────────────────────────────────────────────
+
+  pubmed-producer:
+    image: python:3.11-slim
+    container_name: pubmed-producer
+    networks: [pipeline_net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./producers:/app/producers:ro
+      - ./config:/app/config:ro
+      - ./requirements.txt:/app/requirements.txt:ro
+    working_dir: /app
+    entrypoint: ["bash", "-c"]
+    command: ["pip install -q kafka-python requests && python producers/pubmed_producer.py --query 'health medical recommendation system' --max 1000 --interval 2 --loop"]
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+    restart: unless-stopped
+
+  arxiv-producer:
+    image: python:3.11-slim
+    container_name: arxiv-producer
+    networks: [pipeline_net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./producers:/app/producers:ro
+      - ./config:/app/config:ro
+      - ./requirements.txt:/app/requirements.txt:ro
+    working_dir: /app
+    entrypoint: ["bash", "-c"]
+    command: ["pip install -q kafka-python requests && python producers/arxiv_producer.py --query 'graph neural network recommender system' --max 1000 --interval 2 --loop"]
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+    restart: unless-stopped
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SPARK STREAMING — Kafka → HDFS (distribué sur 4 workers)
+# ─────────────────────────────────────────────────────────────────────────────
+
+  spark-kafka-hdfs:
+    image: apache/spark:3.5.0
+    container_name: spark-kafka-hdfs
+    user: root
+    networks: [pipeline_net]
+    depends_on:
+      - spark-master
+      - spark-worker-1
+      - spark-worker-2
+      - spark-worker-3
+      - spark-worker-4
+      - kafka
+      - namenode
+    volumes:
+      - ./consumers:/opt/spark-apps:ro
+      - ./hadoop:/opt/hadoop/conf:ro
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --deploy-mode
+      - client
+      - --packages
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.apache.hadoop:hadoop-client:3.2.1
+      - --conf
+      - spark.jars.ivy=/tmp/.ivy2
+      - --conf
+      - spark.hadoop.fs.defaultFS=hdfs://namenode:9000
+      - --conf
+      - spark.sql.shuffle.partitions=4
+      - --conf
+      - spark.executor.instances=4
+      - --conf
+      - spark.executor.cores=1
+      - --conf
+      - spark.executor.memory=512m
+      - /opt/spark-apps/spark_kafka_to_hdfs.py
+    environment:
+      - SPARK_NO_DAEMONIZE=true
+      - HADOOP_CONF_DIR=/opt/hadoop/conf
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ELK STACK
@@ -199,3 +332,36 @@ services:
       interval: 20s
       timeout: 10s
       retries: 5
+
+  # ── Filebeat — collecte les logs de tous les containers Docker ───────────────
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.11.0
+    container_name: filebeat
+    networks: [pipeline_net]
+    user: root
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: filebeat -e --strict.perms=false -E http.enabled=true
+    environment:
+      - ELASTICSEARCH_HOST=elasticsearch:9200
+
+  # ── Metricbeat — collecte les métriques système + Docker ────────────────────
+  metricbeat:
+    image: docker.elastic.co/beats/metricbeat:8.11.0
+    container_name: metricbeat
+    networks: [pipeline_net]
+    user: root
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./metricbeat/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: metricbeat -e --strict.perms=false -E http.enabled=true
+    environment:
+      - ELASTICSEARCH_HOST=elasticsearch:9200

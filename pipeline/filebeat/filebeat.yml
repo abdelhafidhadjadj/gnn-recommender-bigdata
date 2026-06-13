@@ -1,0 +1,55 @@
+# Filebeat — Windows Docker Desktop compatible
+# Utilise filestream input + Docker metadata
+
+filebeat.inputs:
+  - type: filestream
+    id: docker-containers
+    enabled: true
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    parsers:
+      - ndjson:
+          target: ""
+          add_error_key: true
+          message_key: log
+    processors:
+      - add_docker_metadata:
+          host: "unix:///var/run/docker.sock"
+          match_fields: ["log.file.path"]
+          match_pids: []
+          match_source: true
+          match_source_index: 4
+          cleanup_timeout: 60
+          labels.dedot: false
+          tags:
+            - docker
+
+processors:
+  - add_host_metadata: ~
+
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  indices:
+    - index: "docker-logs-spark-%{+yyyy.MM.dd}"
+      when.contains:
+        container.name: "spark"
+    - index: "docker-logs-hdfs-%{+yyyy.MM.dd}"
+      when.or:
+        - contains:
+            container.name: "namenode"
+        - contains:
+            container.name: "datanode"
+    - index: "docker-logs-kafka-%{+yyyy.MM.dd}"
+      when.or:
+        - contains:
+            container.name: "kafka"
+        - contains:
+            container.name: "zookeeper"
+    - index: "docker-logs-%{+yyyy.MM.dd}"
+
+setup.template.name: "docker-logs"
+setup.template.pattern: "docker-logs-*"
+setup.ilm.enabled: false
+setup.kibana.host: "kibana:5601"
+logging.level: info
+logging.to_files: false

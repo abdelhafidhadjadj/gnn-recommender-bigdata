@@ -1,9 +1,11 @@
 """
 Centralized configuration for the scientific data ingestion pipeline.
 """
+import os
 
 # ── Kafka ─────────────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"          # from host machine
+# Lire depuis env var si défini (Docker), sinon localhost (host machine)
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_BOOTSTRAP_SERVERS_INTERNAL = "kafka:29092"    # inside Docker network
 
 TOPIC_PUBMED  = "pubmed-articles"
@@ -53,5 +55,5 @@ SPARK_KAFKA_PKG   = (
     "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,"
     "org.apache.hadoop:hadoop-client:3.3.0"
 )
-SPARK_OUTPUT_MODE = "parquet"                       # "parquet" | "console" | "hdfs"
+SPARK_OUTPUT_MODE = "parquet"                       
 LOCAL_OUTPUT_PATH = "../outputs/pipeline"           # fallback when HDFS not available

@@ -95,3 +95,7 @@ coverage.xml
 # Ruff / Black
 .ruff_cache/
 pyspark-*.tar.gz
+
+
+
+CHAPTER4_QUESTIONS.md

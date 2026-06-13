@@ -214,10 +214,24 @@ def evaluate_model(model, full_edge_index: torch.Tensor,
 
     acc = float(accuracy_score(true_bin, pred_bin))
 
-    # global_precision: TP / (TP + FP) across all test interactions.
-    # Measures binary classification quality independently of ranking order.
-    # Mirrors the notebook's evaluate_model precision_global.
-    global_prec = float(precision_score(true_bin, pred_bin, zero_division=0))
+    # global_precision: TP/(TP+FP) computed on positive test interactions
+    # + an equal-sized random sample of unseen (negative) pairs.
+    # Without negatives, the test set contains only observed interactions —
+    # the model assigns sigmoid >= 0.5 to virtually all of them (BPR training),
+    # making precision trivially 1.0. Adding negatives gives a meaningful score.
+    n_items_total = ie.shape[0]
+    rng_neg = np.random.RandomState(42)
+    n_neg   = min(len(df_test), 20_000)
+    neg_u   = rng_neg.randint(0, n_users,        size=n_neg)
+    neg_i   = rng_neg.randint(0, n_items_total,  size=n_neg)
+    neg_scores = (ue[neg_u] * ie[neg_i]).sum(dim=1).detach().numpy()
+    neg_sig    = 1.0 / (1.0 + np.exp(-neg_scores))  # sigmoid
+    neg_true   = np.zeros(n_neg, dtype=int)          # unseen = not relevant
+    neg_pred   = (neg_sig >= 0.5).astype(int)
+
+    combined_true = np.concatenate([true_bin, neg_true])
+    combined_pred = np.concatenate([pred_bin, neg_pred])
+    global_prec   = float(precision_score(combined_true, combined_pred, zero_division=0))
 
     # ── Construire l'ensemble des items vus en training (pour exclusion) ─────
     exclude_seen: dict | None = None

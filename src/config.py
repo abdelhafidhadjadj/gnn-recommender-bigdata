@@ -25,7 +25,7 @@ class DataConfig:
     val_size: float = 0.15    # 70 / 15 / 15 split
     test_size: float = 0.15
     random_state: int = 1
-    rating_thresh: int = 1
+    rating_thresh: int = 3
     relevance_thresh: float = 4.0
 
 

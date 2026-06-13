@@ -133,6 +133,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-sbert-init", action="store_true",
                    help="Disable SBERT item embedding warm-start (Xavier random init instead)")
 
+    # HTML report
+    p.add_argument("--open-report", action="store_true",
+                   help="Générer et ouvrir le rapport HTML à la fin du training")
+
     return p.parse_args()
 
 
@@ -483,7 +487,8 @@ def run_scratch(
         results = evaluate_model(model, edge_idx, df_test, n_users, cfg.eval,
                                  df_train=df_train)
         t_eval = round(_time.perf_counter() - _t0_eval, 2)
-        print_evaluation(results)
+        # Affichage terminal supprimé — résultats disponibles dans le rapport HTML
+        # print_evaluation(results)
 
         print("\n[Baselines]")
         pop  = popularity_baseline(df_train, df_test, n_users, cfg.eval)
@@ -523,6 +528,26 @@ def run_scratch(
             output_dir = os.path.join(output_dir, "metrics"),
         )
         print(f"[Output] Metrics JSON    -> {metrics_path}")
+
+        # ── Post-processing metrics ───────────────────────────────────────────
+        try:
+            import importlib.util as _ilu, os as _os
+            _sp = _ilu.spec_from_file_location(
+                "_compat",
+                _os.path.join(_os.path.dirname(__file__), "utils", "_compat.py")
+            )
+            _cm = _ilu.module_from_spec(_sp)
+            _sp.loader.exec_module(_cm)
+            _run  = _os.path.basename(output_dir)
+            # ROOT = répertoire contenant outputs/ et results_final/
+            _root = _os.path.abspath(_os.path.join(
+                _os.path.dirname(_os.path.abspath(metrics_path)), "..", ".."
+            ))
+            _cm._sync_ranking_cache(
+                _os.path.abspath(metrics_path), _run, _root
+            )
+        except Exception as _ex:
+            print(f"[PostProc] {_ex}")
 
         report = generate_comparison_report(
             metrics_dir = os.path.join(output_dir, "metrics"),
@@ -744,6 +769,23 @@ def main() -> None:
             local_rank  = local_rank,
             world_size  = world_size,
         )
+
+        # ── Génération + ouverture rapport HTML ───────────────────────────────
+        if getattr(args, "open_report", False) and rank == 0:
+            try:
+                import subprocess as _sp, sys as _sys, os as _os
+                _root = _os.path.abspath(_os.path.join(output_dir, "..", ".."))
+                _script = _os.path.join(_root, "generate_report.py")
+                if _os.path.exists(_script):
+                    print("[Report] Génération du rapport HTML...")
+                    _sp.run([_sys.executable, _script], cwd=_root, check=True)
+                    _html = _os.path.join(_root, "results_final", "report.html")
+                    if _os.path.exists(_html):
+                        import webbrowser as _wb
+                        _wb.open(f"file:///{_html.replace(chr(92), '/')}")
+                        print(f"[Report] Rapport ouvert -> {_html}")
+            except Exception as _e:
+                print(f"[Report] Erreur génération : {_e}")
 
     elif cfg.training_mode == "evaluate":
         if args.ckpt is None:

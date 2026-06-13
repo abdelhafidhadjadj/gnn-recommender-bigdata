@@ -27,6 +27,7 @@ import torch
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from demo.inference import (
     build_edge_index_from_ckpt,
@@ -134,19 +135,11 @@ with st.sidebar:
     st.markdown(f"**Epoch :** {ckpt.get('epoch', '?')}")
     st.markdown(f"**Mode :** `{ckpt.get('training_mode', 'scratch')}`")
 
-    # val_score display: incremental runs store a sentinel (version × 1e6) to
-    # force overwrite of gat_best.pt — show real NDCG when available, else label
-    _raw_val = ckpt.get("val_score", 0)
-    _mode    = ckpt.get("training_mode", "scratch")
-    if _raw_val is not None and _raw_val < 2.0:
-        # Real composite score in [0, 1] from scratch/tune
-        st.markdown(f"**Val score :** {_raw_val:.4f}")
-    elif _mode == "incremental":
+    _mode = ckpt.get("training_mode", "scratch")
+    if _mode == "incremental":
+        _raw_val  = ckpt.get("val_score", 0)
         _incr_run = int(_raw_val // 1_000_000)
         st.markdown(f"**Run incrémental :** #{_incr_run}")
-    else:
-        # Scratch training where validation never ran (very short run)
-        st.markdown(f"**Val score :** n/a")
 
     if embs is None:
         st.warning("Impossible de reconstruire le graphe depuis ce checkpoint.")
@@ -175,12 +168,22 @@ with tab1:
     with col_left:
         st.subheader("Sélection utilisateur")
 
-        # User selection
+        # User selection — triés par nombre d'interactions (les plus actifs en premier)
         if user_enc and hasattr(user_enc, "classes_"):
-            user_ids_display = list(user_enc.classes_[:200])
+            extra = ckpt.get("extra", {})
+            _train = extra.get("train_interactions", {})
+            if _train:
+                import collections
+                _counts = collections.Counter(_train["user_ids"].tolist())
+                _sorted = sorted(user_enc.classes_,
+                                 key=lambda u: _counts.get(user_enc.transform([u])[0], 0),
+                                 reverse=True)
+                user_ids_display = list(_sorted[:200])
+            else:
+                user_ids_display = list(user_enc.classes_[:200])
             selected_user_id = st.selectbox(
                 "Utilisateur (user_id)", user_ids_display,
-                help="Utilisateurs connus du modèle (200 premiers affichés)"
+                help="200 utilisateurs les plus actifs du modèle"
             )
             user_idx = user_enc.transform([selected_user_id])[0]
         else:
@@ -279,19 +282,82 @@ with tab2:
         st.error("Embeddings non disponibles.")
         st.stop()
 
-    # Session state basket
+    # Session state basket  {name: biz_id}  et ratings {name: int}
     if "cold_basket" not in st.session_state:
-        st.session_state.cold_basket = {}  # {name: biz_id}
+        st.session_state.cold_basket = {}
+    if "cold_ratings" not in st.session_state:
+        st.session_state.cold_ratings = {}  # {name: rating 1-5}
 
-    # Build category list
+    # Mots-clés qui identifient une catégorie comme médicale/santé
+    _MEDICAL_KEYWORDS = {
+        "acupuncture", "addiction", "allergist", "alternative medicine",
+        "anesthesiol", "animal assisted therapy", "animal physical therapy",
+        "audiologist", "ayurveda", "behavior analyst",
+        "blood", "plasma", "body contouring",
+        "cannabis clinic", "cannabis collective", "cannabis dispensar",
+        "cardio", "cardiolog", "care", "chiropract",
+        "clinic", "colonics", "concierge medicine",
+        "cosmetic surgeon", "cosmetic dentist", "counseling", "mental health",
+        "cpr", "crisis pregnancy", "cryotherapy",
+        "dental", "dentist", "dermatolog",
+        "diagnostic", "dialysis", "dietitian", "doctor",
+        "doula", "drugstore", "pharmacy",
+        "ear nose", "emt", "emergency", "endocrinolog", "endodontist",
+        "esthetician", "eyebrow", "eyelash", "eyewear", "optician",
+        "family practice", "fertility", "first aid",
+        "fitness", "float spa", "foot care",
+        "gastroenterolog", "general dentistry",
+        "gerontolog", "gynecolog",
+        "hair loss", "hair removal", "halotherapy",
+        "halfway house", "health", "hearing",
+        "herbal", "holistic", "home health",
+        "hospice", "hospital", "hypnosis", "hypnotherapy",
+        "immunolog", "infusion",
+        "lab", "laser", "laser hair",
+        "massage", "medical", "meditation",
+        "mental", "midwife", "naturopath",
+        "nephrol", "neurolog", "nurse", "nursing",
+        "nutritionist", "nutrition", "obstetr",
+        "oncolog", "ophthalmolog", "optometrist",
+        "oral", "orthodont", "orthoped",
+        "osteopath", "pain management",
+        "pediatr", "physical therapy", "physiother",
+        "pilates", "plastic surgeon",
+        "podiatrist", "psychiatr", "psycholog",
+        "psychotherap", "pulmonolog",
+        "radiol", "rehabilitation", "rheumatolog",
+        "sexual health", "skin care", "sleep",
+        "speech therapist", "sports medicine",
+        "surgeon", "surgery",
+        "therapy", "traditional chinese",
+        "urology", "urgent care",
+        "vaccine", "vein", "vision",
+        "weight loss", "wellness", "wound care",
+        "yoga", "yoga studio",
+    }
+
+    # Catégories non-médicales à exclure explicitement (faux positifs)
+    _EXCLUDE_CATS = {
+        "laser tag", "nurseries & gardening", "floral designers",
+        "florists", "flowers & gifts", "career counseling",
+        "child care & day care", "aerial fitness",
+    }
+
+    def _is_medical(cat: str) -> bool:
+        c_lower = cat.lower()
+        if c_lower in _EXCLUDE_CATS:
+            return False
+        return any(kw in c_lower for kw in _MEDICAL_KEYWORDS)
+
+    # Build category list — uniquement catégories médicales/santé
     all_cats = []
     if not biz_df.empty and "categories" in biz_df.columns:
         for cats_str in biz_df["categories"].dropna().unique():
             for cat in str(cats_str).split(","):
                 c = cat.strip()
-                if c and c != "N/A":
+                if c and c != "N/A" and _is_medical(c):
                     all_cats.append(c)
-    all_cats = sorted(set(all_cats))[:100]
+    all_cats = sorted(set(all_cats))
 
     if not all_cats:
         st.warning(
@@ -337,20 +403,33 @@ with tab2:
                 for name in selected:
                     biz_id = full_name_to_biz.get(name, name)
                     st.session_state.cold_basket[name] = biz_id
+                    if name not in st.session_state.cold_ratings:
+                        st.session_state.cold_ratings[name] = 5  # défaut 5⭐
                 st.rerun()
         with col_clear:
             if st.button("🗑️ Vider le panier", use_container_width=True, disabled=not st.session_state.cold_basket):
                 st.session_state.cold_basket = {}
+                st.session_state.cold_ratings = {}
                 st.rerun()
 
         st.markdown("---")
         st.markdown(f"**🛒 Panier ({len(st.session_state.cold_basket)}/10 items) :**")
         if st.session_state.cold_basket:
+            st.caption("Ajustez votre note ⭐ pour pondérer l'influence de chaque item sur le profil.")
             for name in list(st.session_state.cold_basket):
-                c1, c2 = st.columns([4, 1])
-                c1.markdown(f"• {name}")
-                if c2.button("✕", key=f"rm_{name}", help="Retirer"):
+                c1, c2, c3 = st.columns([3, 2, 1])
+                c1.markdown(f"• **{name[:35]}**")
+                rating = c2.select_slider(
+                    "⭐",
+                    options=[1, 2, 3, 4, 5],
+                    value=st.session_state.cold_ratings.get(name, 5),
+                    key=f"rating_cold_{name}",
+                    label_visibility="collapsed",
+                )
+                st.session_state.cold_ratings[name] = rating
+                if c3.button("✕", key=f"rm_{name}", help="Retirer"):
                     del st.session_state.cold_basket[name]
+                    st.session_state.cold_ratings.pop(name, None)
                     st.rerun()
         else:
             st.caption("_Vide — ajoutez des items depuis n'importe quelle catégorie_")
@@ -360,20 +439,26 @@ with tab2:
     with col_b:
         st.subheader("Recommandations cold-start")
 
-        basket = st.session_state.cold_basket
+        basket  = st.session_state.cold_basket
+        ratings = st.session_state.cold_ratings
         if not basket:
             st.info("Ajoutez au moins un item dans le panier pour voir les recommandations.")
         else:
-            # Map basket names → item indices
+            # Map basket names → item indices + ratings associés
             liked_item_indices = []
+            liked_ratings      = []
             for name, biz_id in basket.items():
                 if item_enc and item_enc.is_known(biz_id):
                     liked_item_indices.append(int(item_enc.transform([biz_id])[0]))
+                    liked_ratings.append(float(ratings.get(name, 5)))
 
             if not liked_item_indices:
                 st.warning("Impossible de résoudre les indices items.")
             else:
-                recs_cold = recommend_cold_start(liked_item_indices, embs, n_users, n_items, k=k2)
+                recs_cold = recommend_cold_start(
+                    liked_item_indices, embs, n_users, n_items,
+                    k=k2, ratings=liked_ratings
+                )
                 recs_cold_df = enrich_recommendations(recs_cold, item_enc, biz_df)
 
                 st.markdown("**Profil simulé :**")
